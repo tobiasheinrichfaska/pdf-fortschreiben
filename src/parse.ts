@@ -5,25 +5,9 @@
  */
 import type { PdfDict, PdfObject, PdfStream } from './objects.ts';
 import { isDict, isName } from './objects.ts';
+import { PdfReadError, type ReadFailure } from './errors.ts';
 
-export type ReadFailure =
-  | 'syntax'
-  | 'no-startxref'
-  | 'xref-stream'
-  | 'object-stream'
-  | 'xref-loop'
-  | 'object-missing'
-  | 'object-mismatch'
-  | 'encrypted'
-  | 'linearized';
-
-export class PdfReadError extends Error {
-  readonly code: ReadFailure;
-  constructor(code: ReadFailure, detail: string) {
-    super(`${code}: ${detail}`);
-    this.code = code;
-  }
-}
+export { PdfReadError, type ReadFailure };
 
 const isWhite = (c: number): boolean =>
   c === 0x20 || c === 0x0a || c === 0x0d || c === 0x09 || c === 0x0c || c === 0x00;
@@ -338,7 +322,15 @@ export function readIndirect(
   const mismatch = (): never => {
     throw new PdfReadError('object-mismatch', `object ${num} not at ${offset}`);
   };
-  if (offset > 0 && !isWhite(buf[offset - 1]!) && !isDelim(buf[offset - 1]!)) mismatch();
+  // The byte before the header must separate it from the previous token. Exception: a revision appended
+  // directly after an EOL-less `%%EOF` (pyHanko after a pdf-lib file) starts right behind those 5 bytes.
+  if (
+    offset > 0 &&
+    !isWhite(buf[offset - 1]!) &&
+    !isDelim(buf[offset - 1]!) &&
+    !(offset >= 5 && latin1Text(buf, offset - 5, offset) === '%%EOF')
+  )
+    mismatch();
   const lx = new Lexer(buf, offset);
   const nWord = lx.word();
   const gWord = lx.word();

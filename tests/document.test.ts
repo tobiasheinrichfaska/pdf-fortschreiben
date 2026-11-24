@@ -550,3 +550,44 @@ describe('hand-built revision chains and guards', () => {
     expect(g.object(ref(2, 0))).toBe(a);
   });
 });
+
+describe('revision directly after an EOL-less %%EOF', () => {
+  async function glued(prefix: string): Promise<{ bytes: Uint8Array; num: number }> {
+    let s = ascii(await base());
+    s = s.replace(/%%EOF\s*$/, '%%EOF');
+    const f = new PdfFile(latin1Bytes(s));
+    const num = f.size;
+    const prev = f.revisions[f.revisions.length - 1]!.xrefAt;
+    const objAt = s.length + prefix.length;
+    const xrefAt = objAt + `${num} 0 obj\n<</A 1>>\nendobj\n`.length;
+    const pad = (n: number): string => String(n).padStart(10, '0');
+    s +=
+      `${prefix}${num} 0 obj\n<</A 1>>\nendobj\n` +
+      `xref\n${num} 1\n${pad(objAt)} 00000 n \ntrailer\n<</Size ${num + 1}/Root ${f.rootRef.num} 0 R/Prev ${prev}>>\nstartxref\n${xrefAt}\n%%EOF\n`;
+    return { bytes: latin1Bytes(s), num };
+  }
+
+  it('reads the older revision, attachmentChanges and appendRevision work', async () => {
+    const { bytes, num } = await glued('');
+    const f = new PdfFile(bytes);
+    expect(f.revisions).toHaveLength(2);
+    expect(f.object(ref(num))).toBeDefined();
+    expect(await attachmentChanges(bytes)).toEqual([]);
+    const out = appendRevision(bytes, (file, u) =>
+      attachFile(file, u, { name: 'a.txt', data: latin1Bytes('x'), mimeType: 'text/plain' }),
+    );
+    expect(new PdfFile(out).revisions).toHaveLength(3);
+    expect(out.slice(0, bytes.length)).toEqual(bytes);
+  });
+
+  it('still refuses a header right behind a digit', async () => {
+    const { bytes, num } = await glued('7');
+    let code: string | undefined;
+    try {
+      new PdfFile(bytes).object(ref(num));
+    } catch (e) {
+      code = (e as PdfReadError).code;
+    }
+    expect(code).toBe('object-mismatch');
+  });
+});

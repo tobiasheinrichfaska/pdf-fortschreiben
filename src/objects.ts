@@ -3,7 +3,7 @@
  * modelled: numbers, booleans, null, names, literal and hex strings, arrays, dictionaries, references,
  * streams, and `raw` text (fixed-width placeholders whose byte offsets the writer reports).
  */
-import { PdfReadError } from './parse.ts'; // used at call time only (parse.ts imports this file too)
+import { PdfReadError } from './errors.ts';
 
 export interface PdfName {
   readonly t: 'name';
