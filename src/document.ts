@@ -54,6 +54,11 @@ export class PdfFile {
       at = typeof prev === 'number' ? prev : null;
     }
     sections.reverse();
+    for (const s of sections) {
+      const size = s.trailer.entries.get('Size');
+      if (typeof size === 'number' && (!Number.isInteger(size) || size < 0 || size > 2147483647))
+        throw new PdfReadError('syntax', `trailer /Size ${size} is not a valid object count`);
+    }
     for (const s of sections)
       if (s.trailer.entries.has('Encrypt'))
         throw new PdfReadError('encrypted', 'the trailer has /Encrypt');
@@ -98,10 +103,15 @@ export class PdfFile {
 
   /** The object a reference points to (in the newest revision). */
   object(r: PdfRef): PdfObject | PdfStream {
-    const hit = this.cache.get(r.num);
-    if (hit !== undefined) return hit;
     const e = this.table.get(r.num);
     if (e === undefined) throw new PdfReadError('object-missing', `object ${r.num}`);
+    if (e.gen !== r.gen)
+      throw new PdfReadError(
+        'object-mismatch',
+        `object ${r.num}: generation ${r.gen} referenced, the file has ${e.gen}`,
+      );
+    const hit = this.cache.get(r.num);
+    if (hit !== undefined) return hit;
     const o = readIndirect(this.bytes, e.offset, r.num, (len) => {
       const v = isRef(len) ? this.object(len) : len;
       if (typeof v !== 'number') throw new PdfReadError('syntax', `stream length of ${r.num}`);

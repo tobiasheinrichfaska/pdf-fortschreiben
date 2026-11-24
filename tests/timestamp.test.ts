@@ -264,3 +264,25 @@ describe('findDocTimeStamps: audit fixes', () => {
     expect(ms).toBeLessThan(2000);
   });
 });
+
+describe('forged /ByteRange', () => {
+  it(
+    'rangeDigest returns an empty digest for invalid ranges without allocating',
+    { timeout: 2000 },
+    async () => {
+      const { rangeDigest } = await import('../src/index.ts');
+      const b = new Uint8Array(100);
+      for (const r of [
+        [0, 4e9, 0, 1],
+        [1, 2, 3, 4],
+        [0, 50, 10, 1],
+        [0, 4, 90, 20],
+        [0, -1, 5, 1],
+        [0, 1.5, 5, 1],
+        [0, 4],
+      ])
+        expect(rangeDigest(b, r).length).toBe(0);
+      expect(rangeDigest(b, [0, 4, 10, 90]).length).toBe(32);
+    },
+  );
+});

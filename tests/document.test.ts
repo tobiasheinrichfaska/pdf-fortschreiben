@@ -166,3 +166,30 @@ describe('writer refusals and freed objects', () => {
     expect(() => u.set(ref(0, 0), dict({}))).toThrow();
   });
 });
+
+describe('forged references and sizes', () => {
+  it('a reference with the wrong generation fails at read time with a code', async () => {
+    const f = new PdfFile(await base());
+    const r = f.rootRef;
+    let code: string | undefined;
+    try {
+      f.object(ref(r.num, r.gen + 1));
+    } catch (e) {
+      code = (e as PdfReadError).code;
+    }
+    expect(code).toBe('object-mismatch');
+    expect(() => f.object(r)).not.toThrow();
+  });
+
+  it('refuses a trailer /Size beyond 2^31-1', async () => {
+    const s = ascii(await base());
+    const m = /\/Size (\d+)/.exec(s)!;
+    const pdf = latin1Bytes(s.replace(m[0], '/Size 9999999999'));
+    expect(() => new PdfFile(pdf)).toThrow(PdfReadError);
+    try {
+      new PdfFile(pdf);
+    } catch (e) {
+      expect((e as PdfReadError).code).toBe('syntax');
+    }
+  });
+});

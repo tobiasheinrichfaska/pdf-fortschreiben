@@ -61,9 +61,17 @@ export function derLength(bytes: Uint8Array): number | null {
   return 2 + n + len;
 }
 
+/** A byte range of four non-negative integers: a = 0, b <= c, c + d <= length. */
+function validRange(length: number, range: readonly number[]): boolean {
+  if (range.length !== 4 || !range.every((x) => Number.isSafeInteger(x) && x >= 0)) return false;
+  const [a, b, c, d] = range as [number, number, number, number];
+  return a === 0 && b <= c && c + d <= length;
+}
+
 /** The digest a document time stamp covers: SHA-256 over the two ranges. */
 export function rangeDigest(bytes: Uint8Array, range: readonly number[]): Uint8Array {
   const [a, b, c, d] = range as [number, number, number, number];
+  if (!validRange(bytes.length, range)) return new Uint8Array(0);
   const joined = new Uint8Array(b + d);
   joined.set(bytes.subarray(a, a + b), 0);
   joined.set(bytes.subarray(c, c + d), b);
@@ -314,6 +322,7 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
   const rangeOk =
     a === 0 &&
     c > b &&
+    validRange(bytes.length, range) &&
     endAt <= bytes.length &&
     revision >= 0 &&
     isOwnContents(bytes, num, b, c, contents.bytes);
@@ -332,7 +341,7 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
     revision: revision >= 0 ? revision : null,
     rangeOk,
     get digest(): Uint8Array {
-      return (digest ??= endAt <= bytes.length ? rangeDigest(bytes, range) : new Uint8Array(0));
+      return (digest ??= rangeDigest(bytes, range));
     },
     token: tokenOk ? contents.bytes.subarray(0, len!) : new Uint8Array(0),
     tokenOk,

@@ -141,3 +141,13 @@ describe('literal string line ends', () => {
     expect(str('(a\\rb)')).toEqual([0x61, 0x0d, 0x62]);
   });
 });
+
+describe('unsafe integers', () => {
+  it('refuses integers and generations beyond 2^53', () => {
+    expect(codeOf(() => new Lexer(text('99999999999999999999'), 0).readObject())).toBe('syntax');
+    expect(codeOf(() => new Lexer(text('1 99999999999999999999 R'), 0).readObject())).toBe(
+      'syntax',
+    );
+    expect(new Lexer(text('123'), 0).readObject()).toBe(123);
+  });
+});

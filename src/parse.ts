@@ -109,11 +109,15 @@ export class Lexer {
     if (w === 'null') return null;
     if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(w)) this.fail(`unexpected "${w}"`);
     const n = Number(w);
+    if (/^[+-]?\d+$/.test(w) && !Number.isSafeInteger(n)) this.fail(`integer too large "${w}"`);
     // An integer may start a reference "num gen R".
     if (/^\d+$/.test(w)) {
       const save = this.pos;
       const g = this.word();
-      if (/^\d+$/.test(g) && this.word() === 'R') return { t: 'ref', num: n, gen: Number(g) };
+      if (/^\d+$/.test(g) && this.word() === 'R') {
+        if (!Number.isSafeInteger(Number(g))) this.fail(`integer too large "${g}"`);
+        return { t: 'ref', num: n, gen: Number(g) };
+      }
       this.pos = save;
     }
     return n;
