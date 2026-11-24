@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { PdfFile } from '../src/document.ts';
 import { Lexer, PdfReadError, lastStartxref, readIndirect, readXrefSection } from '../src/parse.ts';
 import { TextSink } from '../src/objects.ts';
 import { text } from './helpers.ts';
@@ -149,5 +150,62 @@ describe('unsafe integers', () => {
       'syntax',
     );
     expect(new Lexer(text('123'), 0).readObject()).toBe(123);
+  });
+});
+
+describe('stream length guards', () => {
+  const read = (s: string) => readIndirect(text(s), 0, 1, (o) => o as number);
+
+  it('refuses a /Length that reaches past the end of the file', () => {
+    expect(codeOf(() => read('1 0 obj\n<< /Length 50 >>\nstream\n\nendstream\n'))).toBe('syntax');
+    expect(codeOf(() => read('1 0 obj\n<< /Length 9 >>\nstream\n'))).toBe('syntax');
+  });
+
+  it('refuses /Length -1 even when the data is empty (the position would move back)', () => {
+    expect(codeOf(() => read('1 0 obj\n<< /Length -1 >>\nstream\nendstream\nendobj\n'))).toBe(
+      'syntax',
+    );
+    expect(read('1 0 obj\n<< /Length 0 >>\nstream\nendstream\nendobj\n')).toMatchObject({
+      t: 'stream',
+    });
+  });
+});
+
+describe('hand-built classic files', () => {
+  /** Objects 1.. as given (object 1 is the catalog), a classic xref and a trailer; `prev` may name the xref itself. */
+  const build = (bodies: string[], prev?: (xrefAt: number) => number): Uint8Array => {
+    let out = '%PDF-1.7\n';
+    const offsets: number[] = [];
+    bodies.forEach((b, i) => {
+      offsets.push(out.length);
+      out += `${i + 1} 0 obj\n${b}\nendobj\n`;
+    });
+    const xrefAt = out.length;
+    out += `xref\n0 ${bodies.length + 1}\n0000000000 65535 f\r\n`;
+    for (const o of offsets) out += `${String(o).padStart(10, '0')} 00000 n\r\n`;
+    const p = prev === undefined ? '' : ` /Prev ${prev(xrefAt)}`;
+    out += `trailer\n<< /Size ${bodies.length + 1} /Root 1 0 R${p} >>\nstartxref\n${xrefAt}\n%%EOF\n`;
+    return text(out);
+  };
+  const catalog = '<< /Type /Catalog >>';
+
+  it('reports an object stream when the object is read', () => {
+    const pdf = build([
+      catalog,
+      '<< /Type /ObjStm /N 0 /First 0 /Length 0 >>\nstream\n\nendstream',
+    ]);
+    const f = new PdfFile(pdf);
+    expect(() => f.object({ t: 'ref', num: 1, gen: 0 })).not.toThrow();
+    expect(codeOf(() => f.object({ t: 'ref', num: 2, gen: 0 }))).toBe('object-stream');
+  });
+
+  it('reports a cross-reference stream object when it is read', () => {
+    const pdf = build([catalog, '<< /Type /XRef /Length 0 >>\nstream\n\nendstream']);
+    expect(codeOf(() => new PdfFile(pdf).object({ t: 'ref', num: 2, gen: 0 }))).toBe('xref-stream');
+  });
+
+  it('refuses a /Prev that points at its own xref section', () => {
+    expect(new PdfFile(build([catalog])).revisions).toHaveLength(1);
+    expect(codeOf(() => new PdfFile(build([catalog], (at) => at)))).toBe('xref-loop');
   });
 });

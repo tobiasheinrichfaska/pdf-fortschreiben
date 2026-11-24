@@ -52,3 +52,12 @@ await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelös
   `Update.objects`/`generations` sind schreibgeschützte Kopien.
 - Keine Langzeit-Prüfdaten (DSS) bisher, keine Prüfung, _was_ sich in späteren Revisionen geändert hat (nur `attachmentChanges`: entfernte oder
   geänderte Anhänge).
+- Ein Verweis mit falscher Generation (`5 1 R`, die Datei hat `5 0`) wird **absichtlich abgelehnt**
+  (`object-mismatch`) und nicht, wie die PDF-Norm es für lesende Programme vorsieht, als `null` gelesen: die
+  Bibliothek schreibt nur weiter und soll nichts stillschweigend übergehen.
+- `FoundTimeStamp.digest` wird **erst beim Zugriff** über den Puffer des Aufrufers berechnet. Dieser Puffer
+  darf sich nach `findDocTimeStamps` nicht mehr ändern.
+- Die Trailer-`/ID` wird aus der Basisdatei **übernommen, nicht ergänzt**. PDF/A-3 verlangt sie: die Basisdatei
+  des Aufrufers muss eine haben.
+- Die Zahl der Objekte (`/Size`) ist auf 2147483647 begrenzt (so viel liest `PdfFile`); `Update.add`, `set` und
+  `writeUpdate` lehnen mehr mit einem `Error` ab.

@@ -24,6 +24,9 @@ import {
   type XrefSection,
 } from './parse.ts';
 
+/** The largest `/Size` a file may have (what `PdfFile` accepts and `writeUpdate` may write). */
+export const MAX_SIZE = 2147483647;
+
 export interface Revision {
   /** Offset of this revision's `xref` keyword. */
   readonly xrefAt: number;
@@ -56,7 +59,7 @@ export class PdfFile {
     sections.reverse();
     for (const s of sections) {
       const size = s.trailer.entries.get('Size');
-      if (typeof size === 'number' && (!Number.isInteger(size) || size < 0 || size > 2147483647))
+      if (typeof size === 'number' && (!Number.isInteger(size) || size < 0 || size > MAX_SIZE))
         throw new PdfReadError('syntax', `trailer /Size ${size} is not a valid object count`);
     }
     for (const s of sections)
@@ -195,6 +198,10 @@ export class Update {
 
   /** Adds a new object and returns its reference. */
   add(o: PdfObject | PdfStream): PdfRef {
+    if (this.next + 1 > MAX_SIZE)
+      throw new Error(
+        `Update.add: /Size would exceed ${MAX_SIZE} (the file has ${this.file.size})`,
+      );
     const r = ref(this.next++);
     this.objs.set(r.num, o);
     this.gens.set(r.num, 0);
@@ -207,6 +214,8 @@ export class Update {
     if (r.num === 0) throw new Error('object 0 cannot be set');
     if (r.gen !== gen)
       throw new Error(`object ${r.num}: generation ${r.gen} given, the file has ${gen}`);
+    if (r.num + 1 > MAX_SIZE)
+      throw new Error(`Update.set: object ${r.num} would make /Size exceed ${MAX_SIZE}`);
     this.objs.set(r.num, o);
     this.gens.set(r.num, gen);
     if (r.num >= this.next) this.next = r.num + 1;
@@ -283,7 +292,9 @@ export function writeUpdate(
   }
   const prevAt = file.revisions[file.revisions.length - 1]!.xrefAt;
   const trailer = new Map<string, PdfObject>();
-  trailer.set('Size', Math.max(update.size, (nums[nums.length - 1] ?? 0) + 1));
+  const size = Math.max(update.size, (nums[nums.length - 1] ?? 0) + 1);
+  if (size > MAX_SIZE) throw new Error(`writeUpdate: /Size ${size} exceeds ${MAX_SIZE}`);
+  trailer.set('Size', size);
   trailer.set('Root', file.rootRef);
   const info = trailerExtra['Info'] ?? file.trailer.entries.get('Info');
   if (info !== undefined) trailer.set('Info', info);

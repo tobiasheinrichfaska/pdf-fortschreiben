@@ -1,4 +1,13 @@
-import { PdfFile, PdfReadError, Update, dict, name, ref, writeUpdate } from '../src/index.ts';
+import {
+  PdfFile,
+  PdfReadError,
+  Update,
+  appendRevision,
+  dict,
+  name,
+  ref,
+  writeUpdate,
+} from '../src/index.ts';
 import { TextSink } from '../src/objects.ts';
 import { ascii, basePdf } from './helpers.ts';
 
@@ -191,5 +200,61 @@ describe('forged references and sizes', () => {
     } catch (e) {
       expect((e as PdfReadError).code).toBe('syntax');
     }
+  });
+});
+
+describe('object count limit', () => {
+  const MAX = 2147483647;
+  /** The base file with its trailer /Size set to `size` (the table itself is unchanged). */
+  const withSize = async (size: number): Promise<Uint8Array> => {
+    const s = ascii(await base());
+    const m = /\/Size (\d+)/.exec(s)!;
+    return latin1Bytes(s.replace(m[0], `/Size ${size}`));
+  };
+
+  it('refuses add and set that would push /Size past what PdfFile accepts', async () => {
+    const file = new PdfFile(await withSize(MAX));
+    expect(file.size).toBe(MAX);
+    const u = new Update(file);
+    expect(() => u.add(dict({}))).toThrow(/Size/);
+    expect(() => u.set(ref(MAX), dict({}))).toThrow(/Size/);
+    expect(u.objects.size).toBe(0);
+  });
+
+  it('writes a readable file up to the limit and refuses the object after it', async () => {
+    const pdf = await withSize(MAX - 1);
+    const file = new PdfFile(pdf);
+    const u = new Update(file);
+    const r = u.add(dict({ A: 1 }));
+    expect(r.num).toBe(MAX - 1);
+    expect(u.size).toBe(MAX);
+    expect(() => u.add(dict({}))).toThrow(/Size/);
+    const out = writeUpdate(file, u).bytes;
+    const again = new PdfFile(out);
+    expect(again.size).toBe(MAX);
+    expect(again.object(r)).toMatchObject({ t: 'dict' });
+  });
+
+  it('writeUpdate refuses a size beyond the limit even if the maps were bypassed', async () => {
+    const file = new PdfFile(await withSize(MAX));
+    const u = new Update(file);
+    Object.defineProperty(u, 'objects', { get: () => new Map([[MAX, dict({})]]) });
+    expect(() => writeUpdate(file, u)).toThrow(/Size/);
+  });
+});
+
+describe('page tree depth', () => {
+  const nested = async (depth: number): Promise<Uint8Array> =>
+    appendRevision(await base(), (f, u) => {
+      let cur = u.add(dict({ Type: name('Page') }));
+      for (let i = 0; i < depth; i++) cur = u.add(dict({ Type: name('Pages'), Kids: [cur] }));
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.set('Pages', cur);
+      u.set(f.rootRef, cat);
+    });
+
+  it('follows a chain within the limit and ignores one of 40 levels', async () => {
+    expect(new PdfFile(await nested(20)).pages()).toHaveLength(1);
+    expect(new PdfFile(await nested(40)).pages()).toHaveLength(0);
   });
 });

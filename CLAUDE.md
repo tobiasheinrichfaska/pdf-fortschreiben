@@ -89,4 +89,10 @@ npm test
 - `readAttachments` decodes only uncompressed or single `FlateDecode` streams; others come back raw with
   `unsupportedFilter` and `filter`. `attachFile` refuses name trees with `/Kids`, reading follows them.
 - Error types are mixed: `PdfReadError` (with `code`) for reading, `Error`/`RangeError` for usage errors.
+- A reference whose generation differs from the file's is refused on purpose (`object-mismatch`) instead of
+  being read as null (the spec's rule for readers): the library only appends and must not skip silently.
+- `FoundTimeStamp.digest` is computed lazily over the caller's buffer; it must not change after
+  `findDocTimeStamps`.
+- The trailer `/ID` is carried over, never added; PDF/A-3 needs it, so the caller's base file must have one.
+- `/Size` is capped at 2147483647 (what `PdfFile` accepts): `Update.add`/`set`/`writeUpdate` refuse more.
 - The external check depends on `openssl`, `pdfsig` and pyHanko on the machine; see `scripts/`.

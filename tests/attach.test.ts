@@ -244,3 +244,82 @@ describe('attachmentChanges cost', () => {
     expect(calls).toBe(2);
   });
 });
+
+describe('guards of the name tree and the writer', () => {
+  /** A /Kids chain `depth` nodes deep with one file in the deepest node. */
+  const chain = async (depth: number) =>
+    withNames(await basePdf(), (u) => {
+      let cur: PdfObject = u.add(dict({ Names: [latin1('deep'), spec(u, 'deep', 'D')] }));
+      for (let i = 1; i < depth; i++) cur = u.add(dict({ Kids: [cur] }));
+      return dict({ EmbeddedFiles: dict({ Kids: [cur] }) });
+    });
+
+  it('names the loop of a cyclic /Kids', async () => {
+    const pdf = withNames(await basePdf(), (u) => {
+      const k = u.add(dict({}));
+      u.set(k, dict({ Kids: [k] }));
+      return dict({ EmbeddedFiles: dict({ Kids: [k] }) });
+    });
+    await expect(readAttachments(new PdfFile(pdf))).rejects.toThrow(/loop/);
+  });
+
+  it('follows a /Kids chain of 20 levels and refuses one of 40', async () => {
+    const ok = await readAttachments(new PdfFile(await chain(20)));
+    expect(ok.map((a) => a.name)).toEqual(['deep']);
+    const deep = await chain(40);
+    await expect(readAttachments(new PdfFile(deep))).rejects.toBeInstanceOf(PdfReadError);
+    await expect(readAttachments(new PdfFile(deep))).rejects.toThrow(/too deep/);
+  });
+
+  it('refuses names with a line end or non-ASCII and MIME types without a subtype', async () => {
+    const pdf = await basePdf();
+    for (const n of ['ä\n', 'a\n', '', 'ä.txt'])
+      expect(() => appendRevision(pdf, (f, u) => attachFile(f, u, file(n)))).toThrow(/printable/);
+    for (const m of ['text', 'text/plain\n', '/plain', 'text/'])
+      expect(() =>
+        appendRevision(pdf, (f, u) =>
+          attachFile(f, u, { name: 'a.txt', data: text('x'), mimeType: m }),
+        ),
+      ).toThrow(/MIME/);
+  });
+});
+
+describe('attachmentChanges reporting', () => {
+  const version = (
+    pdf: Uint8Array,
+    body: string | undefined,
+    desc = 'd',
+    extra: Record<string, PdfObject> = {},
+  ) =>
+    withNames(pdf, (u) => {
+      if (body === undefined) return dict({});
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain'), ...extra }),
+        data: text(body),
+      });
+      const s = u.add(
+        dict({
+          Type: name('Filespec'),
+          F: latin1('f.txt'),
+          Desc: latin1(desc),
+          EF: dict({ F: ef }),
+        }),
+      );
+      return dict({ EmbeddedFiles: dict({ Names: [latin1('f.txt'), s] }) });
+    });
+
+  it('reports a file changed in one revision and removed in a later one once, at the change', async () => {
+    const r1 = version(await basePdf(), 'one');
+    const r2 = version(r1, 'two');
+    const r3 = version(r2, undefined);
+    expect(await attachmentChanges(r3)).toEqual([{ name: 'f.txt', kind: 'changed', revision: 2 }]);
+  });
+
+  it('length-prefixes the fields: description "ab" + filter "c" differs from "a" + "bc"', async () => {
+    const r1 = version(await basePdf(), 'same', 'ab', { Filter: name('c') });
+    const r2 = version(r1, 'same', 'a', { Filter: name('bc') });
+    expect(await attachmentChanges(r2)).toEqual([{ name: 'f.txt', kind: 'changed', revision: 2 }]);
+    expect(await attachmentChanges(version(r1, 'same', 'ab', { Filter: name('c') }))).toEqual([]);
+  });
+});
