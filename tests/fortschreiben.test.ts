@@ -60,7 +60,8 @@ describe('revisions', () => {
     const f = new PdfFile(next);
     expect(f.revisions).toHaveLength(2);
     expect(f.revisions[0]!.end).toBe(base.length);
-    expect(ascii(f.revisionBytes(0))).toBe(ascii(base));
+    // plus the single line end after %%EOF (the writer's lead), which a stamp's /ByteRange covers
+    expect(ascii(f.revisionBytes(0))).toBe(ascii(base) + '\n');
     const loaded = await PDFDocument.load(next);
     expect(loaded.getPageCount()).toBe(1);
   });

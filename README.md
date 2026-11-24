@@ -42,7 +42,8 @@ await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelös
   (`xref-stream`, `object-stream`, `encrypted`).
 - Die Bibliothek prüft **keine Tokens** (Signatur, Kette, Abdruck = Hash): das macht der übergebene Prüfer.
   Sie prüft nur, dass der Bereich die Datei bis zum Ende der Revision außer genau dem eigenen `/Contents`
-  abdeckt (`rangeOk`).
+  abdeckt (`rangeOk`). `rangeOk` ist **strukturell, kein Manipulationsnachweis**: der Aufrufer muss den
+  Abdruck im Token gegen `t.digest` prüfen (im Beispiel oben `prüfeToken(t.token, t.digest)`).
 - `findDocTimeStamps` bricht bei einem fehlerhaften Stempel nicht ab: der Eintrag hat `error`, `rangeOk` und
   `tokenOk` sind `false`.
 - Die Antwort des `Stamper` muss genau eine DER-SEQUENCE sein; BER mit unbestimmter Länge wird abgelehnt.
@@ -58,6 +59,7 @@ await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelös
 - `FoundTimeStamp.digest` wird **erst beim Zugriff** über den Puffer des Aufrufers berechnet. Dieser Puffer
   darf sich nach `findDocTimeStamps` nicht mehr ändern.
 - Die Trailer-`/ID` wird aus der Basisdatei **übernommen, nicht ergänzt**. PDF/A-3 verlangt sie: die Basisdatei
-  des Aufrufers muss eine haben.
+  des Aufrufers muss eine haben. Eine Basisdatei von pdf-lib hat **keine** Trailer-`/ID`; mit
+  `doc.context.trailerInfo.ID` lässt sie sich vor `doc.save()` setzen.
 - Die Zahl der Objekte (`/Size`) ist auf 2147483647 begrenzt (so viel liest `PdfFile`); `Update.add`, `set` und
   `writeUpdate` lehnen mehr mit einem `Error` ab.

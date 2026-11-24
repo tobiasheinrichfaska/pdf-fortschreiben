@@ -467,3 +467,25 @@ describe('rangeDigest', () => {
     expect(rangeDigest(bytes, [0, 10, 5, 1])).toHaveLength(0);
   });
 });
+
+describe('revisionBytes and time stamps', () => {
+  it('every revision prefix keeps its stamps rangeOk, tokenOk and with the same digest', async () => {
+    let pdf = await appendDocTimeStamp(await basePdf(), fakeStamper());
+    pdf = appendRevision(pdf, (_f, u) => {
+      u.add(dict({ Note: textString('x') }));
+    });
+    pdf = await appendDocTimeStamp(pdf, fakeStamper());
+    const full = findDocTimeStamps(pdf);
+    expect(full).toHaveLength(2);
+    const file = new PdfFile(pdf);
+    for (let i = 0; i < file.revisions.length; i++) {
+      const part = findDocTimeStamps(file.revisionBytes(i));
+      for (const [k, t] of part.entries()) {
+        expect(t.rangeOk).toBe(true);
+        expect(t.tokenOk).toBe(true);
+        expect(t.digest).toEqual(full[k]!.digest);
+      }
+      expect(part.length).toBe(full.filter((t) => t.revision! <= i).length);
+    }
+  });
+});

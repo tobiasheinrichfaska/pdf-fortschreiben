@@ -161,11 +161,17 @@ export class PdfFile {
     return out;
   }
 
-  /** This file as it stood at the end of revision `index` (a prefix of the bytes). */
+  /**
+   * This file as it stood at the end of revision `index` (a prefix of the bytes): up to and including the
+   * single line end after `%%EOF` (which a time stamp's `/ByteRange` covers), if there is one.
+   */
   revisionBytes(index: number): Uint8Array {
     const r = this.revisions[index];
     if (r === undefined) throw new RangeError(`no revision ${index}`);
-    return this.bytes.subarray(0, r.end);
+    let end = r.end;
+    if (this.bytes[end] === 0x0d && this.bytes[end + 1] === 0x0a) end += 2;
+    else if (this.bytes[end] === 0x0a || this.bytes[end] === 0x0d) end += 1;
+    return this.bytes.subarray(0, end);
   }
 }
 
@@ -266,12 +272,21 @@ export function writeUpdate(
     if (isStream(o)) {
       const d = { t: 'dict' as const, entries: new Map(o.dict.entries) };
       d.entries.set('Length', o.data.length);
-      sink.write(d);
+      try {
+        sink.write(d);
+      } catch (e) {
+        throw new Error(`writeUpdate: object ${num}: ${(e as Error).message}`, { cause: e });
+      }
       sink.push('\nstream\n');
       // Stream data is binary: appended as it is.
       sink.pushBytes(o.data);
       sink.push('\nendstream');
-    } else sink.write(o);
+    } else
+      try {
+        sink.write(o);
+      } catch (e) {
+        throw new Error(`writeUpdate: object ${num}: ${(e as Error).message}`, { cause: e });
+      }
     sink.push('\nendobj\n');
   }
   const xrefAt = base.length + sink.size;

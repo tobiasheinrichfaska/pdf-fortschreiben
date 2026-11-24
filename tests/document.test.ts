@@ -9,6 +9,7 @@ import {
   writeUpdate,
 } from '../src/index.ts';
 import { TextSink } from '../src/objects.ts';
+import type { PdfObject } from '../src/index.ts';
 import { ascii, basePdf } from './helpers.ts';
 
 const latin1Bytes = (s: string): Uint8Array => Uint8Array.from(s, (c) => c.charCodeAt(0));
@@ -295,5 +296,20 @@ describe('writeUpdate with stream data', () => {
     const o = file.object(r) as { data: Uint8Array };
     expect(o.data.length).toBe(data.length);
     expect(o.data[4099]).toBe(4099 & 0xff);
+  });
+});
+
+describe('writeUpdate error context', () => {
+  it('names object number and dict key / array index of an invalid object', async () => {
+    const f = new PdfFile(await base());
+    const u = new Update(f);
+    const bad = { t: 'string', v: 'x' } as unknown as PdfObject;
+    const r = u.add(dict({ A: [1, dict({ B: bad })] }));
+    expect(() => writeUpdate(f, u)).toThrow(
+      new RegExp(`object ${r.num}: .*unknown object.* at /A\\[1\\]/B`),
+    );
+    const u2 = new Update(f);
+    const r2 = u2.add(bad);
+    expect(() => writeUpdate(f, u2)).toThrow(`object ${r2.num}: write: unknown object`);
   });
 });

@@ -137,6 +137,9 @@ export function hexText(bytes: Uint8Array): string {
   return out;
 }
 
+/** " at /Key[2]" for error messages; empty for the top level. */
+const at = (path: string): string => (path === '' ? '' : ` at ${path}`);
+
 /**
  * Writes objects as Latin-1 text and remembers where each `raw` with an id begins (offset from the start
  * of this writer's output).
@@ -161,7 +164,8 @@ export class TextSink {
     return this.length;
   }
 
-  write(o: PdfObject): void {
+  /** `path` (dict keys and array indices from the top) only labels errors. */
+  write(o: PdfObject, path = ''): void {
     if (o === null) return this.push('null');
     if (typeof o === 'boolean') return this.push(o ? 'true' : 'false');
     if (typeof o === 'number') return this.push(numberText(o));
@@ -169,12 +173,12 @@ export class TextSink {
       this.push('[');
       o.forEach((item, i) => {
         if (i > 0) this.push(' ');
-        this.write(item);
+        this.write(item, `${path}[${i}]`);
       });
       return this.push(']');
     }
     if ((o as { t: string }).t === 'stream')
-      throw new Error('write: a stream is only valid as a top-level indirect object');
+      throw new Error(`write: a stream is only valid as a top-level indirect object${at(path)}`);
     switch (o.t) {
       case 'name':
         return this.push(nameText(o.v));
@@ -187,20 +191,20 @@ export class TextSink {
       case 'raw':
         for (let i = 0; i < o.text.length; i++)
           if (o.text.charCodeAt(i) > 0xff)
-            throw new Error(`raw: character outside Latin-1 at ${i}`);
+            throw new Error(`raw: character outside Latin-1 at ${i}${at(path)}`);
         if (o.id !== undefined) this.marks.set(o.id, this.length);
         return this.push(o.text);
       case 'dict': {
         this.push('<<');
         for (const [k, v] of o.entries) {
           this.push(nameText(k) + ' ');
-          this.write(v);
+          this.write(v, `${path}/${k}`);
           this.push('\n');
         }
         return this.push('>>');
       }
       default:
-        throw new Error('write: unknown object');
+        throw new Error(`write: unknown object ${JSON.stringify(o)}${at(path)}`);
     }
   }
 
