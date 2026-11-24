@@ -2,18 +2,21 @@ import {
   PdfFile,
   PdfReadError,
   Update,
+  appendDocTimeStamp,
   appendRevision,
   attachFile,
   attachmentChanges,
   latin1,
   dict,
   name,
+  isRef,
   ref,
   writeUpdate,
+  type PdfRef,
 } from '../src/index.ts';
 import { TextSink } from '../src/objects.ts';
 import type { PdfObject } from '../src/index.ts';
-import { ascii, basePdf } from './helpers.ts';
+import { ascii, basePdf, fakeStamper } from './helpers.ts';
 
 const latin1Bytes = (s: string): Uint8Array => Uint8Array.from(s, (c) => c.charCodeAt(0));
 
@@ -397,5 +400,43 @@ describe('PdfFile hostile layouts', () => {
     const file = new PdfFile(latin1Bytes(parts.join('')));
     expect(() => file.object(ref(7))).toThrow(PdfReadError);
     expect(() => file.object(ref(7))).not.toThrow(RangeError);
+  });
+});
+
+describe('pages() with an indirect /Kids', () => {
+  const indirectKids = async (): Promise<Uint8Array> => {
+    const pdf = await basePdf(1);
+    return appendRevision(pdf, (f, u) => {
+      const pagesRef = f.catalog.entries.get('Pages') as PdfRef;
+      const node = f.dict(pagesRef)!;
+      const kids = u.add(node.entries.get('Kids') as PdfObject);
+      const copy = { t: 'dict' as const, entries: new Map(node.entries) };
+      copy.entries.set('Kids', kids);
+      u.set(pagesRef, copy);
+    });
+  };
+
+  it('returns the page, not the Pages node, and stamps the page', async () => {
+    const pdf = await indirectKids();
+    const f = new PdfFile(pdf);
+    const pagesRef = f.catalog.entries.get('Pages') as PdfRef;
+    expect(isRef(f.dict(pagesRef)!.entries.get('Kids'))).toBe(true);
+    const pages = f.pages();
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.num).not.toBe(pagesRef.num);
+    const stamped = new PdfFile(await appendDocTimeStamp(pdf, fakeStamper(), { reserve: 2048 }));
+    expect(stamped.dict(pagesRef)!.entries.has('Annots')).toBe(false);
+    expect(stamped.dict(pages[0])!.entries.has('Annots')).toBe(true);
+  });
+
+  it('refuses a /Pages node as a page', async () => {
+    const pdf = await basePdf(1);
+    const bad = appendRevision(pdf, (f, u) => {
+      const pagesRef = f.catalog.entries.get('Pages') as PdfRef;
+      const copy = { t: 'dict' as const, entries: new Map(f.dict(pagesRef)!.entries) };
+      copy.entries.set('Kids', name('X'));
+      u.set(pagesRef, copy);
+    });
+    expect(() => new PdfFile(bad).pages()).toThrow(PdfReadError);
   });
 });

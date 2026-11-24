@@ -706,3 +706,27 @@ describe('malformed input and /AF guard', () => {
     expect(() => appendRevision(viaRef, (f, u) => attachFile(f, u, file('n.json')))).toThrow('/AF');
   });
 });
+
+describe('/Limits of the /EmbeddedFiles root', () => {
+  it('is not left stale after attachFile', async () => {
+    const pdf = await basePdf();
+    const withLimits = withNames(pdf, (u) => {
+      const s = spec(u, 'm', 'x');
+      return dict({
+        EmbeddedFiles: dict({ Limits: [latin1('m'), latin1('m')], Names: [latin1('m'), s] }),
+      });
+    });
+    const one = appendRevision(withLimits, (f, u) => attachFile(f, u, file('a.json')));
+    const two = appendRevision(one, (f, u) => attachFile(f, u, file('z.json')));
+    const f = new PdfFile(two);
+    const tree = f.dict(f.dict(f.catalog.entries.get('Names'))!.entries.get('EmbeddedFiles'))!;
+    const names = (tree.entries.get('Names') as PdfObject[]).filter((_, i) => i % 2 === 0);
+    expect(names).toHaveLength(3);
+    const limits = tree.entries.get('Limits') as { bytes: Uint8Array }[] | undefined;
+    if (limits !== undefined) {
+      expect(limits[0]).toEqual(names[0]);
+      expect(limits[1]).toEqual(names[2]);
+    }
+    expect((await readAttachments(f)).map((a) => a.name).sort()).toEqual(['a.json', 'm', 'z.json']);
+  });
+});

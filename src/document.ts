@@ -7,6 +7,7 @@
 import {
   TextSink,
   isDict,
+  isName,
   isRef,
   ref,
   type PdfDict,
@@ -185,13 +186,23 @@ export class PdfFile {
   /** The page objects in order (follows `/Kids` from the catalog's `/Pages`). */
   pages(): PdfRef[] {
     const out: PdfRef[] = [];
+    const seen = new Set<number>();
     const walk = (r: PdfObject | undefined, depth: number): void => {
-      if (!isRef(r) || depth > 32) return;
+      if (!isRef(r) || depth > 32 || seen.has(r.num)) return;
+      seen.add(r.num);
       const d = this.dict(r);
       if (d === undefined) return;
-      const kids = d.entries.get('Kids');
+      const kids = this.resolve(d.entries.get('Kids'));
       if (Array.isArray(kids)) kids.forEach((k) => walk(k, depth + 1));
-      else out.push(r);
+      else {
+        const type = d.entries.get('Type');
+        if (isName(type, 'Pages'))
+          throw new PdfReadError(
+            'syntax',
+            `page tree node ${r.num} is a /Pages node without /Kids array`,
+          );
+        out.push(r);
+      }
     };
     walk(this.catalog.entries.get('Pages'), 0);
     return out;

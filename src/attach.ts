@@ -176,6 +176,8 @@ export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
   const newKey = latin1(a.name);
   pairs.push({ key: a.name, keyBytes: newKey.bytes, keyObject: newKey, value: spec });
   pairs.sort((x, y) => compareBytes(x.keyBytes, y.keyBytes));
+  // The root's /Limits is optional; the old one would be stale once a key is added.
+  tree.entries.delete('Limits');
   tree.entries.set(
     'Names',
     pairs.flatMap((p) => [p.keyObject, p.value]),
