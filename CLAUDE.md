@@ -10,11 +10,8 @@
 Append revisions to a PDF without rewriting it (incremental update), attach files as PDF/A-3 associated
 files, add PAdES document time stamps (`/DocTimeStamp`, `SubFilter ETSI.RFC3161`) over the whole state, and
 read all of it back (revisions, attachments of any revision, every time stamp the file ever had with its
-byte range and digest). Created 2026-11-24 for the running monthly PDF of `Zeiterfassung` (decision Tobias
+byte range and digest). Created 2026-11-24 for a running monthly PDF of an app (decision Tobias
 2026-11-24: only time stamps, no personal signature; one PDF per month).
-
-**TEMPORARY LOCATION:** a subdirectory of the `Zeiterfassung` repo because the cloud session could not
-create a repository. **Claude on the PC: extract it next time — follow `HERAUSLOESEN.md`.**
 
 **Platform:** library for browsers and Node (standard APIs only)
 **Language:** TypeScript (erasable syntax only)
@@ -36,37 +33,38 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 
 ## Project Directory
 
-| File/Folder        | Purpose                                                                                                                                                                                            |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/objects.ts`   | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets) and serializer                                                                                                      |
-| `src/parse.ts`     | Lexer, indirect objects, classic xref sections, `PdfReadError` codes                                                                                                                               |
-| `src/document.ts`  | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`), `Update`, `writeUpdate`                                                                                         |
-| `src/attach.ts`    | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, **add only**: a used name is refused), `readAttachments`, `attachmentChanges` (files a later revision removed or changed) |
-| `src/timestamp.ts` | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest`                                                                   |
-| `src/sha256.ts`    | Synchronous SHA-256 (copied from `Zeiterfassung/src/logic/sha256.ts`)                                                                                                                              |
-| `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                               |
-| `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                        |
-| `HERAUSLOESEN.md`  | Steps to move this directory into its own repository (delete after doing it)                                                                                                                       |
+| File/Folder                   | Purpose                                                                                                                                                                                            |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/objects.ts`              | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets) and serializer                                                                                                      |
+| `src/parse.ts`                | Lexer, indirect objects, classic xref sections, `PdfReadError` codes                                                                                                                               |
+| `src/document.ts`             | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`), `Update`, `writeUpdate`                                                                                         |
+| `src/attach.ts`               | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, **add only**: a used name is refused), `readAttachments`, `attachmentChanges` (files a later revision removed or changed) |
+| `src/timestamp.ts`            | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest`                                                                   |
+| `src/sha256.ts`               | Synchronous SHA-256 (small copy of a pure SHA-256, no dependency)                                                                                                                                  |
+| `tests/`                      | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                               |
+| `scripts/`                    | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                        |
+| `SECURITY.md`                 | How to report a vulnerability; what never to put into issues                                                                                                                                       |
+| `eslint.config.js`            | TypeScript strict; `src/` may not import `node:` or use `fetch`/`process`/`Buffer`                                                                                                                 |
+| `.github/workflows/tests.yml` | CI on push to main and pull requests: typecheck, lint, format, tests                                                                                                                               |
 
 ## Tests
 
 ```bash
 npm ci
 npm run typecheck
+npm run lint
 npm run format:check
 npm test
 ```
 
 ## Open tasks (in this order)
 
-1. Extract into its own repo (`HERAUSLOESEN.md`).
-2. Errors as codes instead of exceptions (`Result`, like `zeitstempel`), keep `PdfReadError` codes.
-3. ESLint config and a guard test „no `node:` in `src/`“ like `zeitstempel`; a coupling test for private names.
-4. DSS (`/DSS` with `/Certs`, later `/OCSPs`/`/CRLs`) as its own revision after a time stamp (PAdES-LTA).
-5. Visible content per day: decide in the app whether a day changes the page's content stream or adds a page;
+1. Errors as codes instead of exceptions (`Result`, like `zeitstempel`), keep `PdfReadError` codes.
+2. DSS (`/DSS` with `/Certs`, later `/OCSPs`/`/CRLs`) as its own revision after a time stamp (PAdES-LTA).
+3. Visible content per day: decide in the app whether a day changes the page's content stream or adds a page;
    offer a helper here only if it stays app-independent.
-6. Report what changed between revisions (only allowed objects: annotations, AcroForm, attachments, pages).
-7. A build (`dist` + `prepare` or committed build) before an app depends on it by tag.
+4. Report what changed between revisions (only allowed objects: annotations, AcroForm, attachments, pages).
+5. A build (`dist` + `prepare` or committed build) before an app depends on it by tag.
 
 ## Known Limitations
 

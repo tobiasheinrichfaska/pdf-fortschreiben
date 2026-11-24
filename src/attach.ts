@@ -24,7 +24,7 @@ import { sha256Bytes } from './sha256.ts';
 export type Relationship = 'Data' | 'Source' | 'Alternative' | 'Supplement' | 'Unspecified';
 
 export interface Attachment {
-  /** File name, e.g. `zeiterfassung-2026-11.json`. Printable ASCII only (it is also the tree key). */
+  /** File name, e.g. `report-2026-11.json`. Printable ASCII only (it is also the tree key). */
   readonly name: string;
   readonly data: Uint8Array;
   /** MIME type, e.g. `application/json`. */
