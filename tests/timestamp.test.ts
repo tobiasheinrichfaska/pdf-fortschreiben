@@ -1,5 +1,9 @@
 import {
   PdfFile,
+  Update,
+  name,
+  raw,
+  writeUpdate,
   appendDocTimeStamp,
   appendRevision,
   dict,
@@ -111,7 +115,14 @@ function withCopy(pdf: Uint8Array, shape: 'kids' | 'direct' | 'broken'): Uint8Ar
     const fields = file.resolve(form.entries.get('Fields')) as PdfObject[];
     const widget = file.dict(fields[0]!)!;
     const v = file.dict(widget.entries.get('V'))!;
-    const copy: PdfDict = shape === 'broken' ? dict({ SubFilter: v.entries.get('SubFilter')! }) : v;
+    const other = new Map(v.entries); // a different range: not a duplicate of the original stamp
+    other.set('ByteRange', [0, 1, 2, 3]);
+    const copy: PdfDict =
+      shape === 'broken'
+        ? dict({ SubFilter: v.entries.get('SubFilter')! })
+        : shape === 'kids'
+          ? { t: 'dict', entries: other }
+          : v;
     const newField = (extra: Record<string, PdfObject>): PdfRef =>
       u.add(dict({ T: textString('Kopie'), ...extra }));
     let added: PdfRef;
@@ -141,12 +152,10 @@ describe('findDocTimeStamps: robustness', () => {
     expect(found.some((s) => s.field === 'Eltern.Kopie')).toBe(true);
   });
 
-  it('accepts a direct /V dictionary', async () => {
+  it('accepts a direct /V dictionary (listed once, as the indirect stamp)', async () => {
     const found = findDocTimeStamps(withCopy(await base(), 'direct'));
-    expect(found.length).toBe(2);
-    const direct = found.find((s) => s.object === 0)!;
-    expect(direct.field).toBe('Kopie');
-    expect(direct.byteRange).toEqual(found.find((s) => s.object !== 0)!.byteRange);
+    expect(found.length).toBe(1);
+    expect(found[0]!.object).not.toBe(0);
   });
 
   it('a malformed stamp dictionary does not abort the listing', async () => {
@@ -165,5 +174,93 @@ describe('findDocTimeStamps: robustness', () => {
     const one = await base();
     const two = await appendDocTimeStamp(one, fakeStamper());
     expect(findDocTimeStamps(two).length).toBe(2);
+  });
+});
+
+/** Hand-built stamp revision (field + stamp dictionary) to shape the stamp object: padding, spaced hex. */
+function handStamp(pdf: Uint8Array, opts: { pad?: number; spaced?: boolean }): Uint8Array {
+  const file = new PdfFile(pdf);
+  const u = new Update(file);
+  const hex = '0'.repeat(2048);
+  const contents = opts.spaced ? hex.replace(/(.{64})/g, '$1\n ') : hex;
+  const sig = u.add(
+    dict({
+      Type: name('DocTimeStamp'),
+      Pad: textString('x'.repeat(opts.pad ?? 0)),
+      Filter: name('Adobe.PPKLite'),
+      SubFilter: name('ETSI.RFC3161'),
+      ByteRange: raw('[' + ' '.repeat(34) + ']', 'byterange'),
+      Contents: raw('<' + contents + '>', 'contents'),
+    }),
+  );
+  const field = u.add(dict({ FT: name('Sig'), T: textString('Hand'), V: sig }));
+  const catalog = new Map(file.catalog.entries);
+  catalog.set('AcroForm', dict({ Fields: [field], SigFlags: 3 }));
+  u.set(file.rootRef, { t: 'dict', entries: catalog });
+  const { bytes, marks } = writeUpdate(file, u);
+  const start = marks.get('contents')!;
+  const end = start + contents.length + 2;
+  const text = `[0 ${start} ${end} ${bytes.length - end}]`.padEnd(36, ' ');
+  const at = marks.get('byterange')!;
+  for (let i = 0; i < text.length; i++) bytes[at + i] = text.charCodeAt(i);
+  return bytes;
+}
+
+describe('findDocTimeStamps: audit fixes', () => {
+  it('a big stamp dictionary (more than 4096 bytes before /Contents) is still rangeOk', async () => {
+    const [t] = findDocTimeStamps(handStamp(await basePdf(), { pad: 6000 }));
+    expect(t!.error).toBeUndefined();
+    expect(t!.rangeOk).toBe(true);
+  });
+
+  it('whitespace inside the hex string of the gap is tolerated', async () => {
+    const [t] = findDocTimeStamps(handStamp(await basePdf(), { spaced: true }));
+    expect(t!.error).toBeUndefined();
+    expect(t!.rangeOk).toBe(true);
+  });
+
+  it('a direct /V copy does not inflate the count and the indirect entry wins', async () => {
+    const one = await appendDocTimeStamp(await basePdf(), fakeStamper());
+    const found = findDocTimeStamps(withCopy(one, 'direct'));
+    expect(found.length).toBe(1);
+    expect(found[0]!.object).not.toBe(0);
+    expect(found[0]!.rangeOk).toBe(true);
+  });
+
+  it('a direct copy found before the indirect one is replaced by it', async () => {
+    const one = await appendDocTimeStamp(await basePdf(), fakeStamper());
+    const out = appendRevision(one, (file, u) => {
+      const catalog = file.catalog;
+      const form = file.dict(catalog.entries.get('AcroForm'))!;
+      const fields = file.resolve(form.entries.get('Fields')) as PdfObject[];
+      const v = file.dict(file.dict(fields[0]!)!.entries.get('V'))!;
+      const copy = u.add(dict({ T: textString('Kopie'), V: v }));
+      const f2 = new Map(form.entries);
+      f2.set('Fields', [copy, ...fields]); // copy first
+      const ref = catalog.entries.get('AcroForm');
+      if (isRef(ref)) u.set(ref, { t: 'dict', entries: f2 });
+      else {
+        const c2 = new Map(catalog.entries);
+        c2.set('AcroForm', { t: 'dict', entries: f2 });
+        u.set(file.rootRef, { t: 'dict', entries: c2 });
+      }
+    });
+    const found = findDocTimeStamps(out);
+    expect(found.length).toBe(1);
+    expect(found[0]!.object).not.toBe(0);
+  });
+
+  it('30 stamps in a 4 MB file are listed quickly with unchanged results', async () => {
+    let pdf = appendRevision(await basePdf(), (_, u) => {
+      u.add({ t: 'stream', dict: dict({}), data: new Uint8Array(4 * 1024 * 1024).fill(65) });
+    });
+    for (let i = 0; i < 30; i++)
+      pdf = await appendDocTimeStamp(pdf, fakeStamper(), { reserve: 1024 });
+    const t0 = performance.now();
+    const found = findDocTimeStamps(pdf);
+    const ms = performance.now() - t0;
+    expect(found.length).toBe(30);
+    expect(found.every((s) => s.rangeOk && s.tokenOk)).toBe(true);
+    expect(ms).toBeLessThan(2000);
   });
 });

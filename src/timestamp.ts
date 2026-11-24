@@ -137,7 +137,9 @@ export async function appendDocTimeStamp(
   const token = await stamp(rangeDigest(bytes, range));
   const len = derLength(token);
   if (token[0] !== 0x30 || len === null || len !== token.length)
-    throw new Error('stamp: answer is not one DER SEQUENCE');
+    throw new Error(
+      'stamp: answer is not one DER SEQUENCE (DER is required, BER indefinite length is not accepted)',
+    );
   if (token.length > reserve) throw new RangeError(`token (${token.length} B) exceeds reserve`);
   const HEX = '0123456789ABCDEF';
   for (let i = 0; i < token.length; i++) {
@@ -161,6 +163,7 @@ export interface FoundTimeStamp {
    * `/Contents` string (same place, same hex).
    */
   readonly rangeOk: boolean;
+  /** Computed on first access (hashing is the costly part of listing a big file). */
   readonly digest: Uint8Array;
   /** The token (padding removed); empty if `tokenOk` is false. */
   readonly token: Uint8Array;
@@ -209,15 +212,26 @@ export function findDocTimeStamps(pdf: Uint8Array): FoundTimeStamp[] {
         const v = view.dict(vObj);
         if (v === undefined || !isName(v.entries.get('SubFilter'), 'ETSI.RFC3161')) return;
         const num = isRef(vObj) ? vObj.num : 0;
+        // The byte range identifies a stamp (an object number can be reused by a later revision, a direct
+        // /V copy has none): look it up before the expensive describe. An indirect entry beats a direct one.
+        const br = v.entries.get('ByteRange');
+        const rangeKey =
+          Array.isArray(br) && br.length === 4 && br.every((n) => typeof n === 'number')
+            ? `range:${br.join(' ')}`
+            : undefined;
+        const known = rangeKey === undefined ? undefined : found.get(rangeKey);
+        if (known !== undefined && (num === 0 || known.object !== 0)) return;
         let entry: FoundTimeStamp;
         try {
           entry = describe(file, num, v, fieldName);
         } catch (e) {
           entry = broken(num, fieldName, e);
         }
-        // Same object number can be reused by a later revision: the byte range tells them apart.
-        const key = `${num}:${entry.error === undefined ? entry.byteRange.join(' ') : 'bad ' + entry.error}`;
-        if (!found.has(key)) found.set(key, entry);
+        const key =
+          entry.error === undefined && rangeKey !== undefined
+            ? rangeKey
+            : `${num}:bad ${entry.error ?? entry.byteRange.join(' ')}`;
+        if (!found.has(key) || (known !== undefined && key === rangeKey)) found.set(key, entry);
       } catch (e) {
         const key = `field:${isRef(f) ? f.num : 0}:${String(e)}`;
         if (!found.has(key)) found.set(key, broken(0, prefix, e));
@@ -252,16 +266,24 @@ const isTextObject = (t: unknown): t is { t: 'hex' | 'str'; bytes: Uint8Array } 
 /** True if the bytes in `[b, c)` are the hex string `contents`, inside the body of object `num`. */
 function isOwnContents(bytes: Uint8Array, num: number, b: number, c: number, contents: Uint8Array) {
   const gap = latin1Text(bytes, b, c);
-  const m = /^<([0-9A-Fa-f]*)>$/.exec(gap);
-  if (m === null || m[1]!.length !== contents.length * 2) return false;
+  const m = /^<([0-9A-Fa-f\s]*)>$/.exec(gap); // whitespace inside a hex string is allowed
+  if (m === null) return false;
+  const hex = m[1]!.replace(/\s+/g, '');
+  if (hex.length !== contents.length * 2) return false;
   for (let i = 0; i < contents.length; i++)
-    if (parseInt(m[1]!.slice(i * 2, i * 2 + 2), 16) !== contents[i]) return false;
+    if (parseInt(hex.slice(i * 2, i * 2 + 2), 16) !== contents[i]) return false;
   if (num === 0) return true; // direct dictionary: no object body to locate
-  const from = Math.max(0, b - 4096);
-  const before = latin1Text(bytes, from, b);
-  let last: RegExpExecArray | null = null;
-  for (const h of before.matchAll(/(\d+)\s+(\d+)\s+obj\b/g)) last = h;
-  return last !== null && Number(last[1]) === num && !before.slice(last.index).includes('endobj');
+  // The nearest `N G obj` before the string must be this object's, with no `endobj` in between. The
+  // dictionary may be any size, so the window grows until a header is found.
+  for (let size = 4096; ; size *= 4) {
+    const from = Math.max(0, b - size);
+    const before = latin1Text(bytes, from, b);
+    let last: RegExpExecArray | null = null;
+    for (const h of before.matchAll(/(\d+)\s+(\d+)\s+obj\b/g)) last = h;
+    if (last !== null && (last.index > 0 || from === 0))
+      return Number(last[1]) === num && !before.slice(last.index).includes('endobj');
+    if (from === 0) return false;
+  }
 }
 
 function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundTimeStamp {
@@ -297,16 +319,21 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
     len !== null &&
     len <= contents.bytes.length &&
     contents.bytes.subarray(len).every((x) => x === 0);
-  return {
+  // SHA-256 is pure JS (a few MB/s per stamp over a big file): compute it on first access, once.
+  let digest: Uint8Array | undefined;
+  const found: FoundTimeStamp = {
     field,
     object: num,
     byteRange: range,
     revision: revision >= 0 ? revision : null,
     rangeOk,
-    digest: endAt <= bytes.length ? rangeDigest(bytes, range) : new Uint8Array(0),
+    get digest(): Uint8Array {
+      return (digest ??= endAt <= bytes.length ? rangeDigest(bytes, range) : new Uint8Array(0));
+    },
     token: tokenOk ? contents.bytes.subarray(0, len!) : new Uint8Array(0),
     tokenOk,
   };
+  return found;
 }
 
 function decodeText(bytes: Uint8Array): string {
