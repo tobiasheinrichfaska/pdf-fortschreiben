@@ -268,10 +268,8 @@ export function writeUpdate(
       d.entries.set('Length', o.data.length);
       sink.write(d);
       sink.push('\nstream\n');
-      // Stream data is binary: written as Latin-1 characters, byte for byte.
-      let chunk = '';
-      for (const c of o.data) chunk += String.fromCharCode(c);
-      sink.push(chunk);
+      // Stream data is binary: appended as it is.
+      sink.pushBytes(o.data);
       sink.push('\nendstream');
     } else sink.write(o);
     sink.push('\nendobj\n');
@@ -305,10 +303,9 @@ export function writeUpdate(
   sink.push('trailer\n');
   sink.write({ t: 'dict', entries: trailer });
   sink.push(`\nstartxref\n${xrefAt}\n%%EOF\n`);
-  const tail = sink.bytes();
-  const out = new Uint8Array(base.length + tail.length);
+  const out = new Uint8Array(base.length + sink.size);
   out.set(base, 0);
-  out.set(tail, base.length);
+  sink.writeTo(out, base.length);
   const marks = new Map<string, number>();
   for (const [k, v] of sink.marks) marks.set(k, base.length + v);
   return { bytes: out, marks };

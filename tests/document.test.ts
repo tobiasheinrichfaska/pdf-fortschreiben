@@ -258,3 +258,42 @@ describe('page tree depth', () => {
     expect(new PdfFile(await nested(40)).pages()).toHaveLength(0);
   });
 });
+
+describe('writeUpdate with stream data', () => {
+  const streamUpdate = async (data: Uint8Array) => {
+    const pdf = await base();
+    const file = new PdfFile(pdf);
+    const u = new Update(file);
+    const r = u.add({ t: 'stream', dict: dict({ Type: name('X') }), data });
+    return { pdf, r, out: writeUpdate(file, u).bytes };
+  };
+
+  it('writes binary data byte for byte between stream and endstream, prefix unchanged', async () => {
+    const data = Uint8Array.from({ length: 256 }, (_, i) => i);
+    const { pdf, r, out } = await streamUpdate(data);
+    expect(out.subarray(0, pdf.length)).toEqual(pdf);
+    const head = latin1Bytes(`\nstream\n`);
+    const text = ascii(out);
+    const at = text.indexOf(`${r.num} 0 obj\n`, pdf.length);
+    const s = text.indexOf('\nstream\n', at) + head.length;
+    expect(text.slice(at, s)).toContain('/Length 256');
+    expect(out.subarray(s, s + 256)).toEqual(data);
+    expect(text.slice(s + 256, s + 256 + 18)).toBe('\nendstream\nendobj\n');
+    const offset = Number(/(\d{10}) 00000 n/.exec(text.slice(pdf.length))![1]);
+    expect(text.slice(offset, offset + `${r.num} 0 obj`.length)).toBe(`${r.num} 0 obj`);
+    expect(new PdfFile(out).revisions.length).toBe(2);
+  });
+
+  it('writes a 20 MB stream in reasonable time', async () => {
+    const data = new Uint8Array(20 * 1024 * 1024);
+    for (let i = 0; i < data.length; i += 4099) data[i] = i & 0xff;
+    const t0 = performance.now();
+    const { r, out } = await streamUpdate(data);
+    const ms = performance.now() - t0;
+    expect(ms).toBeLessThan(5000);
+    const file = new PdfFile(out);
+    const o = file.object(r) as { data: Uint8Array };
+    expect(o.data.length).toBe(data.length);
+    expect(o.data[4099]).toBe(4099 & 0xff);
+  });
+});

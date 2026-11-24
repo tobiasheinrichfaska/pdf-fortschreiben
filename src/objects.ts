@@ -142,13 +142,19 @@ export function hexText(bytes: Uint8Array): string {
  * of this writer's output).
  */
 export class TextSink {
-  private parts: string[] = [];
+  private parts: (string | Uint8Array)[] = [];
   private length = 0;
   readonly marks = new Map<string, number>();
 
   push(text: string): void {
     this.parts.push(text);
     this.length += text.length;
+  }
+
+  /** Binary data (a stream's content) as it is, without a detour through a string. */
+  pushBytes(data: Uint8Array): void {
+    this.parts.push(data);
+    this.length += data.length;
   }
 
   get size(): number {
@@ -198,15 +204,27 @@ export class TextSink {
     }
   }
 
-  /** The text as bytes; every character is below 256 by construction. */
-  bytes(): Uint8Array {
-    const text = this.parts.join('');
-    const out = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) {
-      const c = text.charCodeAt(i);
-      if (c > 0xff) throw new Error(`bytes: character outside Latin-1 at ${i}`);
-      out[i] = c;
+  /** Writes everything into `out` starting at `at` (room for `size` bytes); text must be Latin-1. */
+  writeTo(out: Uint8Array, at: number): void {
+    let pos = at;
+    for (const part of this.parts) {
+      if (typeof part === 'string') {
+        for (let i = 0; i < part.length; i++) {
+          const c = part.charCodeAt(i);
+          if (c > 0xff) throw new Error(`bytes: character outside Latin-1 at ${pos - at}`);
+          out[pos++] = c;
+        }
+      } else {
+        out.set(part, pos);
+        pos += part.length;
+      }
     }
+  }
+
+  /** The content as bytes; every text character is below 256 by construction. */
+  bytes(): Uint8Array {
+    const out = new Uint8Array(this.length);
+    this.writeTo(out, 0);
     return out;
   }
 }
