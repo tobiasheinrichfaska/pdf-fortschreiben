@@ -440,3 +440,113 @@ describe('pages() with an indirect /Kids', () => {
     expect(() => new PdfFile(bad).pages()).toThrow(PdfReadError);
   });
 });
+
+describe('hand-built revision chains and guards', () => {
+  const header = '%PDF-1.7\n';
+  const obj = (n: number, body: string): string => `${n} 0 obj\n${body}\nendobj\n`;
+  const entry = (off: number): string => `${String(off).padStart(10, '0')} 00000 n\r\n`;
+  const free = '0000000000 65535 f\r\n';
+  const cat = '<< /Type /Catalog >>';
+
+  /** One revision with the given objects; `entries` overrides the offset written for an object number. */
+  const single = (
+    bodies: string[],
+    opts: { size?: string; tail?: string; entries?: Record<number, number> } = {},
+  ): Uint8Array => {
+    let out = header;
+    const offs: number[] = [];
+    bodies.forEach((b, i) => {
+      offs.push(out.length);
+      out += obj(i + 1, b);
+    });
+    const xrefAt = out.length;
+    out += `xref\n0 ${bodies.length + 1}\n${free}`;
+    offs.forEach((o, i) => (out += entry(opts.entries?.[i + 1] ?? o)));
+    out += `trailer\n<< /Size ${opts.size ?? bodies.length + 1} /Root 1 0 R >>\n`;
+    out += `startxref\n${xrefAt}\n${opts.tail ?? '%%EOF\n'}`;
+    return latin1Bytes(out);
+  };
+
+  const codeOf = (fn: () => unknown): string | undefined => {
+    try {
+      fn();
+    } catch (e) {
+      if (e instanceof PdfReadError) return e.code;
+      throw e;
+    }
+    return undefined;
+  };
+
+  it('refuses a /Linearized dictionary as the first object, even with a single revision', () => {
+    const f = single(['<< /Linearized 1 /L 100 /O 3 /E 50 /N 1 /T 90 /H [1 2] >>', cat]);
+    expect(codeOf(() => new PdfFile(f))).toBe('linearized');
+    // /Linearized further down is only an ordinary key.
+    const g = single([cat, '<< /Linearized 1 >>']);
+    expect(new PdfFile(g).revisions).toHaveLength(1);
+  });
+
+  it('refuses revisions that do not lie one after the other (/Prev points forward)', () => {
+    // The newest section (found by the last startxref) lies first in the file; its /Prev points forward.
+    const o1 = header.length;
+    const xAt = o1 + obj(1, cat).length;
+    const xPart = (prev: number): string =>
+      `xref\n0 2\n${free}${entry(o1)}trailer\n<< /Size 2 /Root 1 0 R /Prev ${String(prev).padStart(6, '0')} >>\nstartxref\n${xAt}\n%%EOF\n`;
+    const yAt = xAt + xPart(xAt).length; // /Prev has a fixed width
+    const y = `xref\n0 1\n${free}trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${xAt}\n%%EOF\n`;
+    const file = latin1Bytes(header + obj(1, cat) + xPart(yAt) + y);
+    expect(ascii(file).indexOf('xref\n0 1')).toBe(yAt);
+    expect(codeOf(() => new PdfFile(file))).toBe('linearized');
+  });
+
+  it('refuses two revisions that end at the same %%EOF', () => {
+    // The newest xref section sits inside a comment of the oldest one: both end at one %%EOF.
+    const o1 = header.length;
+    const yAt = o1 + obj(1, cat).length;
+    const yHead = `xref\n0 2\n${free}${entry(o1)}trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${yAt}\n% `;
+    const xAt = yAt + yHead.length;
+    const tail = `xref trailer << /Size 2 /Root 1 0 R /Prev ${yAt} >> startxref ${xAt}\n%%EOF\n`;
+    const bytes = latin1Bytes(header + obj(1, cat) + yHead + tail);
+    expect(codeOf(() => new PdfFile(bytes))).toBe('linearized');
+  });
+
+  it('refuses a /Size that is not a whole non-negative number', () => {
+    expect(new PdfFile(single([cat], { size: '2' })).size).toBe(2);
+    expect(codeOf(() => new PdfFile(single([cat], { size: '3.5' })))).toBe('syntax');
+    expect(codeOf(() => new PdfFile(single([cat], { size: '-1' })))).toBe('syntax');
+  });
+
+  it('revisionBytes takes one line end after %%EOF: CRLF as two bytes, a lone CR or LF as one', () => {
+    const crlf = new PdfFile(single([cat], { tail: '%%EOF\r\nrest' }));
+    expect(crlf.revisionBytes(0).length).toBe(crlf.revisions[0]!.end + 2);
+    const cr = new PdfFile(single([cat], { tail: '%%EOF\rxrest' }));
+    expect(cr.revisionBytes(0).length).toBe(cr.revisions[0]!.end + 1);
+    const lf = new PdfFile(single([cat], { tail: '%%EOF\nrest' }));
+    expect(lf.revisionBytes(0).length).toBe(lf.revisions[0]!.end + 1);
+    const none = new PdfFile(single([cat], { tail: '%%EOF' }));
+    expect(none.revisionBytes(0).length).toBe(none.revisions[0]!.end);
+    expect(() => none.revisionBytes(1)).toThrow(RangeError);
+  });
+
+  it('refuses an xref entry that points at another object (object-mismatch)', () => {
+    const bodies = [cat, '<< /A 1 >>', '<< /A 2 >>', '<< /A 3 >>', '<< /A 4 >>'];
+    const ok = single(bodies);
+    const f0 = new PdfFile(ok);
+    expect(f0.object(ref(5))).toMatchObject({ t: 'dict' });
+    const at4 = ascii(ok).indexOf('4 0 obj');
+    const f = new PdfFile(single(bodies, { entries: { 5: at4 } }));
+    expect(codeOf(() => f.object(ref(5)))).toBe('object-mismatch');
+    expect(codeOf(() => f.object(ref(4)))).toBeUndefined();
+  });
+
+  it('PdfFile.object caches a good object and throws the same code again for a broken one', () => {
+    const bodies = [cat, '<< /A 1 >>'];
+    const at1 = ascii(single(bodies)).indexOf('1 0 obj');
+    const f = new PdfFile(single(bodies, { entries: { 2: at1 } }));
+    expect(codeOf(() => f.object(ref(2)))).toBe('object-mismatch');
+    expect(codeOf(() => f.object(ref(2)))).toBe('object-mismatch');
+    const g = new PdfFile(single(bodies));
+    const a = g.object(ref(2));
+    expect(g.object(ref(2))).toBe(a);
+    expect(g.object(ref(2, 0))).toBe(a);
+  });
+});

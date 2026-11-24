@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { PdfFile } from '../src/document.ts';
-import { Lexer, PdfReadError, lastStartxref, readIndirect, readXrefSection } from '../src/parse.ts';
+import {
+  Lexer,
+  PdfReadError,
+  lastStartxref,
+  readIndirect,
+  readRevisionEnd,
+  readXrefSection,
+} from '../src/parse.ts';
 import { TextSink } from '../src/objects.ts';
 import { text } from './helpers.ts';
 
@@ -234,5 +241,24 @@ describe('readIndirect header position and generation', () => {
     expect(codeOf(() => readIndirect(text(s), 0, 3, (o) => o as number, 0))).toBe(
       'object-mismatch',
     );
+  });
+});
+
+describe('readRevisionEnd', () => {
+  const end = (s: string): number => readRevisionEnd(text(s), 0);
+
+  it('refuses what does not read startxref, an integer and %%EOF', { timeout: 2000 }, () => {
+    expect(codeOf(() => end('startxrex\n12\n%%EOF'))).toBe('syntax');
+    expect(codeOf(() => end('startxref abc\n%%EOF'))).toBe('syntax');
+    expect(codeOf(() => end('startxref 12 junk\n%%EOF'))).toBe('syntax');
+    expect(codeOf(() => end('startxref 12 %%EOX'))).toBe('syntax');
+    expect(codeOf(() => end('startxref 12\n'))).toBe('syntax');
+  });
+
+  it('skips comments between the integer and %%EOF', { timeout: 2000 }, () => {
+    const s = 'startxref\n12\n% c\r%%EOF';
+    expect(end(s)).toBe(s.length);
+    const t = 'startxref 12 % one\n% two\n%%EOF\n';
+    expect(end(t)).toBe(t.length - 1);
   });
 });
