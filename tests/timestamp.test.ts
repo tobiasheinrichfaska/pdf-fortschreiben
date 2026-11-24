@@ -286,3 +286,162 @@ describe('forged /ByteRange', () => {
     },
   );
 });
+
+/** Replaces the /ByteRange text of the index-th listed stamp (the width stays 36). */
+function setRange(pdf: Uint8Array, index: number, range: number[]): Uint8Array {
+  const old = findDocTimeStamps(pdf)[index]!.byteRange;
+  const out = pdf.slice();
+  const at = ascii(pdf).indexOf(`[${old.join(' ')}`);
+  const text = `[${range.join(' ')}]`.padEnd(36, ' ');
+  for (let i = 0; i < text.length; i++) out[at + i] = text.charCodeAt(i);
+  return out;
+}
+
+interface Hand {
+  /** Hex digits of the stamp's own /Contents (default 2048 zeros). */
+  readonly hex?: string;
+  /** Where the range's gap is: the stamp's own string, a copy inside another object, or a direct /V. */
+  readonly where: 'own' | 'other' | 'direct';
+  /** Literal text put into the stamp dictionary before /Contents. */
+  readonly pad?: string;
+}
+
+/** Hand-built stamp revision whose /ByteRange gap can be put elsewhere than the stamp's own string. */
+function handRange(pdf: Uint8Array, o: Hand): Uint8Array {
+  const file = new PdfFile(pdf);
+  const u = new Update(file);
+  const hex = o.hex ?? '0'.repeat(2048);
+  const entries = {
+    ...(o.pad === undefined ? {} : { Pad: raw('(' + o.pad + ')') }),
+    SubFilter: name('ETSI.RFC3161'),
+    ByteRange: raw('[' + ' '.repeat(34) + ']', 'byterange'),
+    Contents: raw('<' + hex + '>', 'contents'),
+  };
+  let field: PdfRef;
+  if (o.where === 'direct')
+    field = u.add(dict({ FT: name('Sig'), T: textString('H'), V: dict(entries) }));
+  else {
+    const sig = u.add(dict(entries));
+    field = u.add(dict({ FT: name('Sig'), T: textString('H'), V: sig }));
+    if (o.where === 'other') u.add(dict({ Copy: raw('<' + hex + '>', 'other') }));
+  }
+  const catalog = new Map(file.catalog.entries);
+  catalog.set('AcroForm', dict({ Fields: [field], SigFlags: 3 }));
+  u.set(file.rootRef, { t: 'dict', entries: catalog });
+  const { bytes, marks } = writeUpdate(file, u);
+  const start = marks.get(o.where === 'other' ? 'other' : 'contents')!;
+  const end = start + hex.length + 2;
+  const text = `[0 ${start} ${end} ${bytes.length - end}]`.padEnd(36, ' ');
+  const at = marks.get('byterange')!;
+  for (let i = 0; i < text.length; i++) bytes[at + i] = text.charCodeAt(i);
+  return bytes;
+}
+
+describe('findDocTimeStamps: isOwnContents', () => {
+  it('the hand-built own string is rangeOk (control)', async () => {
+    const [t] = findDocTimeStamps(handRange(await basePdf(), { where: 'own' }));
+    expect(t!.error).toBeUndefined();
+    expect(t!.rangeOk).toBe(true);
+  });
+
+  it('a gap inside another object is not rangeOk (wrong object number)', async () => {
+    const [t] = findDocTimeStamps(handRange(await basePdf(), { where: 'other' }));
+    expect(t!.error).toBeUndefined();
+    expect(t!.revision).not.toBeNull();
+    expect(t!.rangeOk).toBe(false);
+  });
+
+  it('an `endobj` between the object header and the string is not rangeOk', async () => {
+    const [t] = findDocTimeStamps(handRange(await basePdf(), { where: 'own', pad: 'endobj' }));
+    expect(t!.error).toBeUndefined();
+    expect(t!.rangeOk).toBe(false);
+  });
+
+  it('extra trailing hex digits in the gap compared with the parsed value are not rangeOk', async () => {
+    // An odd digit count parses to one byte more than half the digits; the gap has a digit beyond them.
+    const odd = findDocTimeStamps(
+      handRange(await basePdf(), { where: 'own', hex: '0'.repeat(2049) }),
+    );
+    expect(odd[0]!.error).toBeUndefined();
+    expect(odd[0]!.rangeOk).toBe(false);
+  });
+
+  it('a direct /V dictionary with a correct range is rangeOk with object 0', async () => {
+    const [t] = findDocTimeStamps(handRange(await basePdf(), { where: 'direct' }));
+    expect(t!.error).toBeUndefined();
+    expect(t!.object).toBe(0);
+    expect(t!.rangeOk).toBe(true);
+  });
+});
+
+describe('findDocTimeStamps: range end', () => {
+  const two = async (): Promise<Uint8Array> =>
+    appendDocTimeStamp(await appendDocTimeStamp(await basePdf(), fakeStamper()), fakeStamper());
+
+  it('a range ending at the revision end plus a line end is accepted', async () => {
+    const [first] = findDocTimeStamps(await two());
+    expect(first!.revision).not.toBeNull();
+    expect(first!.rangeOk).toBe(true);
+  });
+
+  it('a range ending two non-EOL bytes after the revision end is not rangeOk, revision null', async () => {
+    const pdf = await two();
+    const [r] = findDocTimeStamps(pdf);
+    const [a, b, c, d] = r!.byteRange as [number, number, number, number];
+    const t = findDocTimeStamps(setRange(pdf, 0, [a, b, c, d + 1]))[0]!;
+    expect(t.byteRange[3]).toBe(d + 1);
+    expect(t.revision).toBeNull();
+    expect(t.rangeOk).toBe(false);
+  });
+
+  it('a range ending in the middle of a revision is not rangeOk, revision null', async () => {
+    const pdf = await appendDocTimeStamp(await basePdf(), fakeStamper());
+    const [a, b, c, d] = findDocTimeStamps(pdf)[0]!.byteRange as [number, number, number, number];
+    const t = findDocTimeStamps(setRange(pdf, 0, [a, b, c, d - 50]))[0]!;
+    expect(t.revision).toBeNull();
+    expect(t.rangeOk).toBe(false);
+  });
+});
+
+describe('appendDocTimeStamp: reserve', () => {
+  it.each([10, 1023, 65537, 70000, 1.5, Number.NaN])('refuses reserve %s', async (reserve) => {
+    await expect(appendDocTimeStamp(await basePdf(), fakeStamper(), { reserve })).rejects.toThrow(
+      RangeError,
+    );
+  });
+
+  it.each([1024, 65536])('accepts reserve %s', async (reserve) => {
+    const out = await appendDocTimeStamp(await basePdf(), fakeStamper(), { reserve });
+    expect(findDocTimeStamps(out)[0]!.rangeOk).toBe(true);
+  });
+});
+
+describe('findDocTimeStamps: /ByteRange length', () => {
+  it.each([3, 5])('a /ByteRange of %s entries yields an entry with an error', async (n) => {
+    const one = await appendDocTimeStamp(await basePdf(), fakeStamper());
+    const pdf = appendRevision(one, (file, u) => {
+      const form = file.dict(file.catalog.entries.get('AcroForm'))!;
+      const fields = file.resolve(form.entries.get('Fields')) as PdfObject[];
+      const v = file.dict(file.dict(fields[0]!)!.entries.get('V'))!;
+      const bad = new Map(v.entries);
+      bad.set(
+        'ByteRange',
+        Array.from({ length: n }, (_, i) => i),
+      );
+      const field = u.add(dict({ T: textString('Kaputt'), V: u.add({ t: 'dict', entries: bad }) }));
+      const f2 = new Map(form.entries);
+      f2.set('Fields', [...fields, field]);
+      const ref = file.catalog.entries.get('AcroForm');
+      if (isRef(ref)) u.set(ref, { t: 'dict', entries: f2 });
+      else {
+        const c2 = new Map(file.catalog.entries);
+        c2.set('AcroForm', { t: 'dict', entries: f2 });
+        u.set(file.rootRef, { t: 'dict', entries: c2 });
+      }
+    });
+    const bad = findDocTimeStamps(pdf).find((s) => s.error !== undefined);
+    expect(bad).toBeDefined();
+    expect(bad!.rangeOk).toBe(false);
+    expect(bad!.byteRange).toEqual([]);
+  });
+});

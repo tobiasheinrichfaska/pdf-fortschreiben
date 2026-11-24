@@ -312,7 +312,7 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
   )
     throw new PdfReadError('syntax', `time stamp ${num}: /ByteRange or /Contents malformed`);
   const range = br as number[];
-  const [a, b, c, d] = range as [number, number, number, number];
+  const [, b, c, d] = range as [number, number, number, number];
   const bytes = file.bytes;
   const endAt = c + d;
   // The range ends with the revision's `%%EOF` and its line end.
@@ -320,10 +320,7 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
     (r) => endAt >= r.end && endAt <= r.end + 2 && /^\r?\n?$/.test(latin1Text(bytes, r.end, endAt)),
   );
   const rangeOk =
-    a === 0 &&
-    c > b &&
-    validRange(bytes.length, range) &&
-    endAt <= bytes.length &&
+    validRange(bytes.length, range) && // a = 0, b <= c, c + d <= length (an empty gap fails isOwnContents)
     revision >= 0 &&
     isOwnContents(bytes, num, b, c, contents.bytes);
   const len = derLength(contents.bytes);
