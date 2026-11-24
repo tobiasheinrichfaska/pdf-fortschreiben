@@ -11,6 +11,7 @@ import {
   latin1,
   name,
   readAttachments,
+  textString,
   ref,
   type PdfObject,
 } from '../src/index.ts';
@@ -534,5 +535,174 @@ describe('UTF-8 key and duplicate hardening', () => {
     }
     const plain = await flateFile(await basePdf(), raw, { DecodeParms: dict({ Predictor: 1 }) });
     expect(ascii((await readAttachments(new PdfFile(plain)))[0]!.data)).toBe('some predicted data');
+  });
+});
+
+describe('attachmentChanges: every field of the attachment', () => {
+  interface Opts {
+    f?: string;
+    uf?: string | null;
+    efUf?: 'same' | 'other' | 'otherType' | 'otherData' | 'otherFilter' | null;
+    size?: number | null;
+    mod?: string | null;
+    efType?: string | null;
+    specType?: string | null;
+    af?: 'in' | 'out' | 'none';
+    tree?: boolean;
+  }
+  const build = (pdf: Uint8Array, o: Opts = {}) =>
+    appendRevision(pdf, (f, u) => {
+      const params = dict({
+        Size: o.size === null ? undefined : (o.size ?? 4),
+        ModDate: o.mod === null ? undefined : latin1(o.mod ?? 'D:20261124000000Z'),
+      });
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({
+          Type: o.efType === null ? undefined : name(o.efType ?? 'EmbeddedFile'),
+          Subtype: name('text/plain'),
+          Params: params,
+        }),
+        data: text('same'),
+      });
+      const mode = o.efUf === undefined ? 'same' : o.efUf;
+      const other =
+        mode === 'same' || mode === null
+          ? undefined
+          : u.add({
+              t: 'stream',
+              dict: dict({
+                Subtype: name(mode === 'otherType' ? 'text/html' : 'text/plain'),
+                ...(mode === 'otherFilter' ? { Filter: name('ASCIIHexDecode') } : {}),
+              }),
+              data: text(mode === 'otherData' ? 'diff' : 'same'),
+            });
+      const ufRef = mode === null ? undefined : mode === 'same' ? ef : other;
+      const s = u.add(
+        dict({
+          Type: o.specType === null ? undefined : name(o.specType ?? 'Filespec'),
+          F: latin1(o.f ?? 'f.txt'),
+          UF: o.uf === null ? undefined : textString(o.uf ?? 'f.txt'),
+          AFRelationship: name('Data'),
+          EF: dict({ F: ef, UF: ufRef }),
+        }),
+      );
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      if (o.tree !== false)
+        cat.entries.set('Names', dict({ EmbeddedFiles: dict({ Names: [latin1('f.txt'), s] }) }));
+      else cat.entries.delete('Names');
+      if (o.af === 'none') cat.entries.delete('AF');
+      else cat.entries.set('AF', o.af === 'out' ? [] : [s]);
+      u.set(f.rootRef, cat);
+    });
+  const changed = { name: 'f.txt', kind: 'changed', revision: 2 };
+
+  it('keeps an identical rebuild and a stamp-free no-op quiet', async () => {
+    const r1 = build(await basePdf());
+    expect(await attachmentChanges(build(r1))).toEqual([]);
+    expect(await attachmentChanges(r1)).toEqual([]);
+  });
+
+  it.each<[string, Opts]>([
+    ['Filespec /F', { f: 'g.txt' }],
+    ['Filespec /UF', { uf: 'g.txt' }],
+    ['missing Filespec /UF', { uf: null }],
+    ['/EF /UF removed', { efUf: null }],
+    ['/EF /UF stream with other data', { efUf: 'otherData' }],
+    ['/EF /UF stream with other /Subtype', { efUf: 'otherType' }],
+    ['/EF /UF stream with a filter', { efUf: 'otherFilter' }],
+    ['/Params /Size', { size: 5 }],
+    ['/Params /Size removed', { size: null }],
+    ['/Params /ModDate', { mod: 'D:20271124000000Z' }],
+    ['/Params /ModDate removed', { mod: null }],
+    ['EmbeddedFile /Type', { efType: 'Other' }],
+    ['EmbeddedFile /Type removed', { efType: null }],
+    ['Filespec /Type', { specType: 'Other' }],
+    ['Filespec /Type removed', { specType: null }],
+    ['removal from /AF', { af: 'out' }],
+    ['deleted /AF', { af: 'none' }],
+  ])('reports a change of %s', async (_n, o) => {
+    const r1 = build(await basePdf());
+    expect(await attachmentChanges(build(r1, o))).toEqual([changed]);
+  });
+});
+
+describe('files listed only in /AF', () => {
+  const afOnly = (pdf: Uint8Array, body = 'same', uf = true) =>
+    appendRevision(pdf, (f, u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain') }),
+        data: text(body),
+      });
+      const s = u.add(
+        dict({
+          Type: name('Filespec'),
+          ...(uf ? { UF: textString('h.txt') } : { F: latin1('h.txt') }),
+          EF: dict({ F: ef }),
+        }),
+      );
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.set('AF', [s]);
+      u.set(f.rootRef, cat);
+    });
+
+  it('reads them with source "af" (name from /UF or /F)', async () => {
+    for (const uf of [true, false]) {
+      const found = await readAttachments(new PdfFile(afOnly(await basePdf(), 'x', uf)));
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ name: 'h.txt', source: 'af', mimeType: 'text/plain' });
+      expect(ascii(found[0]!.data)).toBe('x');
+    }
+  });
+
+  it('does not list a tree file twice and gives it no source', async () => {
+    const pdf = appendRevision(await basePdf(), (f, u) => attachFile(f, u, file('a.json')));
+    const found = await readAttachments(new PdfFile(pdf));
+    expect(found.map((a) => a.name)).toEqual(['a.json']);
+    expect(found[0]!.source).toBeUndefined();
+  });
+
+  it('reports a changed or removed /AF-only file, never an addition', async () => {
+    const r1 = afOnly(await basePdf());
+    expect(await attachmentChanges(r1)).toEqual([]);
+    expect(await attachmentChanges(afOnly(r1))).toEqual([]);
+    expect(await attachmentChanges(afOnly(r1, 'other'))).toEqual([
+      { name: 'h.txt', kind: 'changed', revision: 2 },
+    ]);
+    const gone = appendRevision(r1, (f, u) => {
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.delete('AF');
+      u.set(f.rootRef, cat);
+    });
+    expect(await attachmentChanges(gone)).toEqual([
+      { name: 'h.txt', kind: 'removed', revision: 2 },
+    ]);
+  });
+});
+
+describe('malformed input and /AF guard', () => {
+  it('attachmentChanges throws on a malformed name tree key (fail loud)', async () => {
+    const pdf = withNames(await basePdf(), (u) =>
+      dict({ EmbeddedFiles: dict({ Names: [7, spec(u, 'x', 'a')] }) }),
+    );
+    await expect(attachmentChanges(pdf)).rejects.toBeInstanceOf(PdfReadError);
+  });
+
+  it('attachFile refuses a catalog /AF that is not an array', async () => {
+    for (const bad of [5, dict({}), ref(9999)]) {
+      const pdf = appendRevision(await basePdf(), (f, u) => {
+        const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+        cat.entries.set('AF', bad as PdfObject);
+        u.set(f.rootRef, cat);
+      });
+      expect(() => appendRevision(pdf, (f, u) => attachFile(f, u, file('n.json')))).toThrow();
+    }
+    const viaRef = appendRevision(await basePdf(), (f, u) => {
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.set('AF', u.add(dict({})));
+      u.set(f.rootRef, cat);
+    });
+    expect(() => appendRevision(viaRef, (f, u) => attachFile(f, u, file('n.json')))).toThrow('/AF');
   });
 });

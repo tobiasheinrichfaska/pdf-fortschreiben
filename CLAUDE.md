@@ -95,4 +95,9 @@ npm test
   `findDocTimeStamps`.
 - The trailer `/ID` is carried over, never added; PDF/A-3 needs it, so the caller's base file must have one.
 - `/Size` is capped at 2147483647 (what `PdfFile` accepts): `Update.add`/`set`/`writeUpdate` refuse more.
+- `attachmentChanges` digest covers data, MIME, relationship, description, filter, Filespec `/Type` `/F` `/UF`, a separate
+  `/EF /UF` stream, `/Params` Size/ModDate, stream `/Type` and membership in the catalog `/AF`. Files only in `/AF`
+  are read (`source: 'af'`), only their removal/change is reported (never additions). **Not read:** `/FileAttachment`
+  page annotations. A malformed name tree key makes `attachmentChanges` throw (fail loud, intended).
+  `attachFile` refuses a catalog `/AF` that is not an array.
 - The external check depends on `openssl`, `pdfsig` and pyHanko on the machine; see `scripts/`.

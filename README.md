@@ -49,6 +49,12 @@ await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelös
 - Die Antwort des `Stamper` muss genau eine DER-SEQUENCE sein; BER mit unbestimmter Länge wird abgelehnt.
 - `readAttachments` entschlüsselt nur unkomprimierte oder einfach `FlateDecode`-Ströme; andere Filter kommen
   roh zurück (`unsupportedFilter`, `filter`). Ein `FlateDecode`-Strom, der über `maxInflatedBytes` (Standard 256 MiB, dritter Parameter) hinaus wächst, wird nicht entpackt: das Lesen bricht ab, der Eintrag kommt roh mit `tooLarge` zurück (Schutz vor Dekompressionsbomben). `attachFile` lehnt Namensbäume mit `/Kids` ab, das Lesen folgt ihnen.
+- `attachmentChanges` vergleicht je Anhang: Daten, MIME-Typ, Beziehung, Beschreibung, Filter, Filespec `/Type`, `/F`, `/UF`,
+  `/EF /UF` (eigener Strom: Daten, `/Subtype`, Filter), `/Params` (`Size`, `ModDate`), Strom-`/Type` und die Zugehörigkeit zum
+  Katalog-`/AF`. Dateien, die **nur** in `/AF` stehen (mit `/EF`), liest `readAttachments` mit `source: 'af'` (Name aus `/UF`, sonst `/F`);
+  für sie meldet `attachmentChanges` nur Entfernen/Ändern früher gesehener Einträge, nie ein Hinzufügen. **Nicht gelesen:**
+  `/FileAttachment`-Seitenanmerkungen. Ein fehlerhafter Namensbaum-Schlüssel lässt `attachmentChanges` bewusst **werfen**
+  (`PdfReadError`, laut statt still). `attachFile` lehnt ein Katalog-`/AF` ab, das kein Array (oder Verweis darauf) ist.
 - Fehlerarten gemischt: `PdfReadError` mit `code` beim Lesen, `Error`/`RangeError` bei falscher Benutzung.
   `Update.objects`/`generations` sind schreibgeschützte Kopien.
 - Keine Langzeit-Prüfdaten (DSS) bisher, keine Prüfung, _was_ sich in späteren Revisionen geändert hat (nur `attachmentChanges`: entfernte oder

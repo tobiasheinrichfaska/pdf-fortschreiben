@@ -187,11 +187,10 @@ export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
   const oldAf = isRef(cat.entries.get('AF'))
     ? update.get(cat.entries.get('AF') as PdfRef)
     : cat.entries.get('AF');
+  if (oldAf !== undefined && !Array.isArray(oldAf))
+    throw new Error('attachFile: the catalog /AF is neither an array nor a reference to one');
   const af: PdfObject[] = [];
-  if (Array.isArray(oldAf))
-    for (const item of oldAf) {
-      af.push(item);
-    }
+  if (Array.isArray(oldAf)) for (const item of oldAf) af.push(item);
   af.push(spec);
   cat.entries.set('AF', af);
   update.set(root, cat);
@@ -208,6 +207,11 @@ export interface FoundAttachment {
    */
   readonly data: Readonly<Uint8Array>;
   readonly description?: string;
+  /**
+   * `'af'` for a file that is listed only in the catalog's `/AF` (not in the `/Names /EmbeddedFiles` tree);
+   * absent for a name tree entry.
+   */
+  readonly source?: 'af';
   /**
    * Set when `data` is not decoded: a filter other than a single `/FlateDecode`, a `/FlateDecode` with a
    * predictor in `/DecodeParms`, or a stream that failed to inflate (then `inflateError` is set too).
@@ -350,12 +354,30 @@ export async function readAttachments(
   const names = file.dict(file.catalog.entries.get('Names'));
   const treeRef = names?.entries.get('EmbeddedFiles');
   const out: FoundAttachment[] = [];
-  if (treeRef === undefined) return out;
-  for (const pair of treePairs((o) => file.resolve(o), treeRef, true)) {
+  const afList = file.resolve(file.catalog.entries.get('AF'));
+  const afItems: PdfObject[] = Array.isArray(afList) ? afList : [];
+  const afNums = new Set<number>();
+  for (const item of afItems) if (isRef(item)) afNums.add(item.num);
+  const treeNums = new Set<number>();
+  const entries: { key: string; value: PdfObject; source?: 'af' }[] = [];
+  if (treeRef !== undefined)
+    for (const pair of treePairs((o) => file.resolve(o), treeRef, true)) {
+      if (isRef(pair.value)) treeNums.add(pair.value.num);
+      entries.push({ key: pair.key, value: pair.value });
+    }
+  // Filespecs only in /AF (outside the name tree); /FileAttachment annotations are not read.
+  for (const item of afItems) {
+    if (isRef(item) && treeNums.has(item.num)) continue;
+    const sd = file.dict(item);
+    if (sd === undefined || !isDict(file.resolve(sd.entries.get('EF')) as PdfObject)) continue;
+    const n = fileName(file, sd);
+    if (n !== undefined) entries.push({ key: n, value: item, source: 'af' });
+  }
+  for (const pair of entries) {
     const key = pair.key;
     const spec = file.dict(pair.value);
-    const efRef =
-      spec === undefined ? undefined : file.dict(spec.entries.get('EF'))?.entries.get('F');
+    const efDict = spec === undefined ? undefined : file.dict(spec.entries.get('EF'));
+    const efRef = efDict?.entries.get('F');
     const stream = file.resolve(efRef);
     if (spec === undefined || !isStream(stream)) continue;
     const filter = stream.dict.entries.get('Filter');
@@ -379,7 +401,7 @@ export async function readAttachments(
     }
     if (unsupported || tooLarge || filter === undefined) data = shared(stream.data, cache);
     const desc = file.resolve(spec.entries.get('Desc'));
-    out.push({
+    const found: FoundAttachment = {
       name: key,
       mimeType: nameOf(stream.dict.entries.get('Subtype')),
       relationship: nameOf(spec.entries.get('AFRelationship')),
@@ -387,13 +409,93 @@ export async function readAttachments(
       ...(isStringLike(desc as PdfObject)
         ? { description: decodeText((desc as { bytes: Uint8Array }).bytes) }
         : {}),
+      ...(pair.source === undefined ? {} : { source: pair.source }),
       ...(label === undefined ? {} : { filter: label }),
       ...(unsupported ? { unsupportedFilter: true } : {}),
       ...(inflateError === undefined ? {} : { inflateError }),
       ...(tooLarge ? { tooLarge: true } : {}),
-    });
+    };
+    extras.set(found, extraFields(file, spec, efDict, stream, pair.value, afNums, afList));
+    out.push(found);
   }
   return out;
+}
+
+/** Fields that `attachmentChanges` compares besides the public ones (see `extraFields`). */
+const extras = new WeakMap<FoundAttachment, string[]>();
+
+/** A scalar PDF value as text for comparing; `\0none` when absent. */
+function show(file: PdfFile, o: PdfObject | undefined): string {
+  const v = file.resolve(o) as PdfObject | undefined;
+  if (v === undefined || (v as unknown) === null) return '\0none';
+  if (typeof v === 'number') return `n:${v}`;
+  if (isStringLike(v)) return `s:${decodeText(v.bytes)}`;
+  const nm = nameOf(v);
+  if (nm !== undefined) return `/${nm}`;
+  return `x:${typeof v === 'object' && v !== null && !Array.isArray(v) ? v.t : typeof v}`;
+}
+
+/** The file name of a Filespec: `/UF`, else `/F` (decoded). */
+function fileName(file: PdfFile, spec: PdfDict): string | undefined {
+  for (const k of ['UF', 'F']) {
+    const v = file.resolve(spec.entries.get(k)) as PdfObject | undefined;
+    if (isStringLike(v)) return decodeText(v.bytes);
+  }
+  return undefined;
+}
+
+/**
+ * Everything else about an attachment that a later revision could change without touching its bytes:
+ * Filespec `/Type`, `/F`, `/UF`; stream `/Type`; `/Params` `/Size` and `/ModDate`; a separate `/EF /UF`
+ * stream (data hash, `/Subtype`, filter); membership of the Filespec in the catalog `/AF`; where it was read.
+ */
+function extraFields(
+  file: PdfFile,
+  spec: PdfDict,
+  ef: PdfDict | undefined,
+  stream: PdfStream,
+  value: PdfObject,
+  afNums: ReadonlySet<number>,
+  afList: unknown,
+): string[] {
+  const params = file.dict(stream.dict.entries.get('Params'));
+  const f = ef?.entries.get('F');
+  const uf = ef?.entries.get('UF');
+  let ufField = '\0none';
+  if (uf !== undefined) {
+    const same = isRef(uf) && isRef(f as PdfObject) && uf.num === (f as PdfRef).num;
+    const us = file.resolve(uf);
+    if (same) ufField = '\0same';
+    else if (!isStream(us)) ufField = '\0nostream';
+    else {
+      const h = Array.from(sha256Bytes(us.data), (b) => b.toString(16).padStart(2, '0')).join('');
+      ufField = [
+        h,
+        show(file, us.dict.entries.get('Subtype')),
+        show(file, us.dict.entries.get('Type')),
+        us.dict.entries.has('Filter')
+          ? filterLabel(file.resolve(us.dict.entries.get('Filter')) as PdfObject)
+          : '\0none',
+      ].join('|');
+    }
+  }
+  const member = !Array.isArray(afList)
+    ? 'noaf'
+    : isRef(value)
+      ? afNums.has(value.num)
+        ? 'in'
+        : 'out'
+      : 'direct';
+  return [
+    show(file, spec.entries.get('Type')),
+    show(file, spec.entries.get('F')),
+    show(file, spec.entries.get('UF')),
+    show(file, stream.dict.entries.get('Type')),
+    show(file, params?.entries.get('Size')),
+    show(file, params?.entries.get('ModDate')),
+    ufField,
+    member,
+  ];
 }
 
 export interface AttachmentChange {
@@ -439,7 +541,10 @@ export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChan
   return out;
 }
 
-/** Digest over data (via its SHA-256), MIME type, relationship, description and filter (length-prefixed fields). */
+/**
+ * Digest over data (via its SHA-256), MIME type, relationship, description, filter, source and the `extras`
+ * fields (length-prefixed). A malformed name tree key makes `attachmentChanges` throw (fail loud).
+ */
 const dataHashes = new WeakMap<Uint8Array, Uint8Array>();
 
 function attachmentDigest(a: FoundAttachment): string {
@@ -455,6 +560,8 @@ function attachmentDigest(a: FoundAttachment): string {
     enc.encode(a.relationship ?? '\0none'),
     enc.encode(a.description ?? '\0none'),
     enc.encode(a.filter ?? '\0none'),
+    enc.encode(a.source ?? 'tree'),
+    ...(extras.get(a) ?? []).map((x) => enc.encode(x)),
   ];
   const buf = new Uint8Array(fields.reduce((n, f) => n + 4 + f.length, 0));
   let at = 0;
