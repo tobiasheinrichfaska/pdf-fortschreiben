@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Lexer, PdfReadError, lastStartxref, readIndirect, readXrefSection } from '../src/parse.ts';
+import { TextSink } from '../src/objects.ts';
 import { text } from './helpers.ts';
 
 const codeOf = (fn: () => unknown): string | undefined => {
@@ -95,5 +96,48 @@ describe('readIndirect', () => {
       'syntax',
     );
     expect(codeOf(() => read('1 0 obj\n<< /Length 2 >>\nstream\nabc\nendstream\n'))).toBe('syntax');
+  });
+});
+
+describe('names round-trip byte-exact', () => {
+  const written = (src: string): Uint8Array => {
+    const sink = new TextSink();
+    sink.write(new Lexer(text(src)).readObject());
+    return sink.bytes();
+  };
+
+  it('keeps non-UTF-8 bytes and a BOM', () => {
+    expect(new Lexer(text('/Fl#E4che')).readObject()).toEqual({ t: 'name', v: 'Fl\u00e4che' });
+    expect(new Lexer(text('/#EF#BB#BFAb')).readObject()).toEqual({
+      t: 'name',
+      v: '\u00ef\u00bb\u00bfAb',
+    });
+    expect(written('<</Fl#E4che 1>>')).toEqual(text('<</Fl#e4che 1\n>>'));
+    expect(written('/#EF#BB#BFAb')).toEqual(text('/#ef#bb#bfAb'));
+  });
+
+  it('writes characters above U+00FF as UTF-8 bytes', () => {
+    const sink = new TextSink();
+    sink.write({ t: 'name', v: 'A\u20acB' });
+    expect(sink.bytes()).toEqual(text('/A#e2#82#acB'));
+  });
+});
+
+describe('literal string line ends', () => {
+  const str = (s: string) => {
+    const o = new Lexer(text(s)).readObject() as { bytes: Uint8Array };
+    return Array.from(o.bytes);
+  };
+
+  it('reads an unescaped CR or CRLF as one LF', () => {
+    expect(str('(a\rb)')).toEqual([0x61, 0x0a, 0x62]);
+    expect(str('(a\r\nb)')).toEqual([0x61, 0x0a, 0x62]);
+    expect(str('(a\nb)')).toEqual([0x61, 0x0a, 0x62]);
+    expect(str('(a\r\rb)')).toEqual([0x61, 0x0a, 0x0a, 0x62]);
+  });
+
+  it('keeps escaped line continuations and escaped CR', () => {
+    expect(str('(a\\\r\nb)')).toEqual([0x61, 0x62]);
+    expect(str('(a\\rb)')).toEqual([0x61, 0x0d, 0x62]);
   });
 });

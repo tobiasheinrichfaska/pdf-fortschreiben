@@ -135,7 +135,8 @@ export class Lexer {
         this.pos++;
       }
     }
-    return { t: 'name', v: new TextDecoder().decode(Uint8Array.from(bytes)) };
+    // One char per byte (Latin-1), so every name round-trips byte-exact.
+    return { t: 'name', v: String.fromCharCode(...bytes) };
   }
 
   private readLiteral(): PdfObject {
@@ -170,6 +171,10 @@ export class Lexer {
       } else if (c === 0x29) {
         if (--depth === 0) return { t: 'str', bytes: Uint8Array.from(out) };
         out.push(c);
+      } else if (c === 0x0d) {
+        // An unescaped end-of-line (CR or CRLF) reads as one LF (7.3.4.2).
+        if (b[this.pos] === 0x0a) this.pos++;
+        out.push(0x0a);
       } else out.push(c);
     }
     this.fail('unterminated string');

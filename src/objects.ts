@@ -97,7 +97,13 @@ const isRegular = (c: number): boolean =>
 
 function nameText(v: string): string {
   let out = '/';
-  const bytes = new TextEncoder().encode(v);
+  // Characters up to U+00FF are one byte each (as the reader decodes names); others are UTF-8.
+  const bytes: number[] = [];
+  for (const ch of v) {
+    const cp = ch.codePointAt(0)!;
+    if (cp <= 0xff) bytes.push(cp);
+    else bytes.push(...new TextEncoder().encode(ch));
+  }
   for (const c of bytes)
     out += isRegular(c) ? String.fromCharCode(c) : '#' + c.toString(16).padStart(2, '0');
   return out;
