@@ -13,7 +13,8 @@ export type ReadFailure =
   | 'object-stream'
   | 'xref-loop'
   | 'object-missing'
-  | 'object-mismatch';
+  | 'object-mismatch'
+  | 'encrypted';
 
 export class PdfReadError extends Error {
   readonly code: ReadFailure;
@@ -27,9 +28,12 @@ const isWhite = (c: number): boolean =>
   c === 0x20 || c === 0x0a || c === 0x0d || c === 0x09 || c === 0x0c || c === 0x00;
 const isDelim = (c: number): boolean => '()<>[]{}/%'.includes(String.fromCharCode(c));
 
+const MAX_DEPTH = 256;
+
 export class Lexer {
   readonly buf: Uint8Array;
   pos: number;
+  private depth = 0;
   constructor(buf: Uint8Array, pos = 0) {
     this.buf = buf;
     this.pos = pos;
@@ -69,6 +73,15 @@ export class Lexer {
   }
 
   readObject(): PdfObject {
+    if (++this.depth > MAX_DEPTH) this.fail('nesting too deep');
+    try {
+      return this.readObjectInner();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private readObjectInner(): PdfObject {
     this.skipSpace();
     const c = this.buf[this.pos];
     if (c === undefined) this.fail('end of data');
@@ -113,7 +126,9 @@ export class Lexer {
       const c = this.buf[this.pos]!;
       if (isWhite(c) || isDelim(c)) break;
       if (c === 0x23) {
-        bytes.push(parseInt(latin1Text(this.buf, this.pos + 1, this.pos + 3), 16));
+        const hex = latin1Text(this.buf, this.pos + 1, this.pos + 3);
+        if (!/^[0-9a-fA-F]{2}$/.test(hex)) this.fail('bad name escape');
+        bytes.push(parseInt(hex, 16));
         this.pos += 3;
       } else {
         bytes.push(c);
@@ -167,6 +182,7 @@ export class Lexer {
       const c = this.buf[this.pos++]!;
       if (!isWhite(c)) digits += String.fromCharCode(c);
     }
+    if (this.buf[this.pos] !== 0x3e) this.fail('unterminated hex string');
     this.pos++;
     if (!/^[0-9a-fA-F]*$/.test(digits)) this.fail('bad hex string');
     if (digits.length % 2) digits += '0';
@@ -227,7 +243,24 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
   const lx = new Lexer(buf, at);
   const w = lx.peekWord();
   if (w !== 'xref') {
-    if (/^\d+$/.test(w)) throw new PdfReadError('xref-stream', `cross-reference stream at ${at}`);
+    if (/^\d+$/.test(w)) {
+      lx.word();
+      const gen = lx.word();
+      if (/^\d+$/.test(gen) && lx.word() === 'obj') {
+        const obj = lx.readObject();
+        if (isDict(obj)) {
+          const type = obj.entries.get('Type');
+          if (
+            typeof type === 'object' &&
+            type !== null &&
+            !Array.isArray(type) &&
+            type.t === 'name' &&
+            type.v === 'XRef'
+          )
+            throw new PdfReadError('xref-stream', `cross-reference stream at ${at}`);
+        }
+      }
+    }
     throw new PdfReadError('syntax', `no xref at ${at}`);
   }
   lx.word();
@@ -235,15 +268,25 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
   for (;;) {
     const head = lx.peekWord();
     if (head === 'trailer') break;
-    const start = Number(lx.word());
-    const count = Number(lx.word());
-    if (!Number.isInteger(start) || !Number.isInteger(count) || count < 0)
+    if (!/^\d+$/.test(head)) throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
+    const startWord = lx.word();
+    const countWord = lx.word();
+    if (!/^\d+$/.test(startWord) || !/^\d+$/.test(countWord))
+      throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
+    const start = Number(startWord);
+    const count = Number(countWord);
+    if (!Number.isSafeInteger(start + count))
       throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
     for (let i = 0; i < count; i++) {
-      const offset = Number(lx.word());
-      const gen = Number(lx.word());
+      const offsetWord = lx.word();
+      const genWord = lx.word();
       const kind = lx.word();
-      if (kind !== 'n' && kind !== 'f') throw new PdfReadError('syntax', `xref entry at ${lx.pos}`);
+      if (!/^\d+$/.test(offsetWord) || !/^\d+$/.test(genWord) || (kind !== 'n' && kind !== 'f'))
+        throw new PdfReadError('syntax', `xref entry at ${lx.pos}`);
+      const offset = Number(offsetWord);
+      const gen = Number(genWord);
+      if (!Number.isSafeInteger(offset) || gen > 65535 || (kind === 'n' && offset >= buf.length))
+        throw new PdfReadError('syntax', `xref entry values at ${lx.pos}`);
       entries.set(start + i, { offset, gen, inUse: kind === 'n' });
     }
   }
@@ -259,8 +302,10 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
 export function lastStartxref(buf: Uint8Array, end = buf.length): number {
   const i = lastIndexOf(buf, 'startxref', end);
   if (i < 0) throw new PdfReadError('no-startxref', 'no startxref');
-  const n = Number(new Lexer(buf, i + 'startxref'.length).word());
-  if (!Number.isInteger(n) || n < 0 || n >= buf.length)
+  const word = new Lexer(buf, i + 'startxref'.length).word();
+  if (!/^\d+$/.test(word)) throw new PdfReadError('no-startxref', 'bad startxref');
+  const n = Number(word);
+  if (!Number.isSafeInteger(n) || n < 0 || n >= buf.length)
     throw new PdfReadError('no-startxref', 'bad startxref');
   return n;
 }
@@ -283,6 +328,12 @@ export function readIndirect(
     if (buf[lx.pos] === 0x0d) lx.pos++;
     if (buf[lx.pos] === 0x0a) lx.pos++;
     const len = resolveLength(value.entries.get('Length') ?? null);
+    if (!Number.isInteger(len) || len < 0 || lx.pos + len > buf.length)
+      throw new PdfReadError('syntax', `stream length of object ${num}`);
+    let end = lx.pos + len;
+    while (end < buf.length && isWhite(buf[end]!)) end++;
+    if (latin1Text(buf, end, end + 9) !== 'endstream')
+      throw new PdfReadError('syntax', `no endstream for object ${num}`);
     const data = buf.slice(lx.pos, lx.pos + len);
     const type = value.entries.get('Type');
     if (typeof type === 'object' && type !== null && !Array.isArray(type) && type.t === 'name') {
