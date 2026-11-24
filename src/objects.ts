@@ -3,6 +3,7 @@
  * modelled: numbers, booleans, null, names, literal and hex strings, arrays, dictionaries, references,
  * streams, and `raw` text (fixed-width placeholders whose byte offsets the writer reports).
  */
+import { PdfReadError } from './parse.ts'; // used at call time only (parse.ts imports this file too)
 
 export interface PdfName {
   readonly t: 'name';
@@ -76,6 +77,26 @@ export function textString(text: string): PdfHex {
     bytes[3 + i * 2] = c & 0xff;
   }
   return hex(bytes);
+}
+
+/**
+ * A PDF text string as text: UTF-16BE with byte order mark, UTF-8 with byte order mark (PDF 2.0; the mark is
+ * dropped), else PDFDocEncoding (taken as Latin-1). An odd-length UTF-16 string is a `syntax` error.
+ */
+export function decodeText(bytes: Uint8Array): string {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
+    return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    if (bytes.length % 2 !== 0)
+      throw new PdfReadError('syntax', 'name tree key: odd UTF-16 length');
+    let out = '';
+    for (let i = 2; i < bytes.length; i += 2)
+      out += String.fromCharCode((bytes[i]! << 8) | bytes[i + 1]!);
+    return out;
+  }
+  let out = '';
+  for (const b of bytes) out += String.fromCharCode(b);
+  return out;
 }
 
 export const isDict = (o: PdfObject | undefined): o is PdfDict =>

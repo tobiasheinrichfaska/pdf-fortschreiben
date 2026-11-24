@@ -4,7 +4,7 @@
  * sections, no cross-reference streams, no object streams); anything else is refused with a code.
  */
 import type { PdfDict, PdfObject, PdfStream } from './objects.ts';
-import { isDict, isRef } from './objects.ts';
+import { isDict, isName } from './objects.ts';
 
 export type ReadFailure =
   | 'syntax'
@@ -233,14 +233,6 @@ export function lastIndexOf(buf: Uint8Array, marker: string, before = buf.length
   return -1;
 }
 
-export function indexOf(buf: Uint8Array, marker: string, from = 0): number {
-  outer: for (let i = from; i <= buf.length - marker.length; i++) {
-    for (let k = 0; k < marker.length; k++) if (buf[i + k] !== marker.charCodeAt(k)) continue outer;
-    return i;
-  }
-  return -1;
-}
-
 /** One `xref` section with its trailer, as found in the file. */
 export interface XrefSection {
   /** Offset of the `xref` keyword (the value `startxref` points to). */
@@ -262,13 +254,7 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
         const obj = lx.readObject();
         if (isDict(obj)) {
           const type = obj.entries.get('Type');
-          if (
-            typeof type === 'object' &&
-            type !== null &&
-            !Array.isArray(type) &&
-            type.t === 'name' &&
-            type.v === 'XRef'
-          )
+          if (isName(type, 'XRef'))
             throw new PdfReadError('xref-stream', `cross-reference stream at ${at}`);
         }
       }
@@ -372,10 +358,8 @@ export function readIndirect(
       throw new PdfReadError('syntax', `no endstream for object ${num}`);
     const data = buf.slice(lx.pos, lx.pos + len);
     const type = value.entries.get('Type');
-    if (typeof type === 'object' && type !== null && !Array.isArray(type) && type.t === 'name') {
-      if (type.v === 'ObjStm') throw new PdfReadError('object-stream', `object ${num}`);
-      if (type.v === 'XRef') throw new PdfReadError('xref-stream', `object ${num}`);
-    }
+    if (isName(type, 'ObjStm')) throw new PdfReadError('object-stream', `object ${num}`);
+    if (isName(type, 'XRef')) throw new PdfReadError('xref-stream', `object ${num}`);
     const dictCopy: PdfDict = { t: 'dict', entries: new Map(value.entries) };
     dictCopy.entries.delete('Length');
     return { t: 'stream', dict: dictCopy, data };
@@ -385,5 +369,3 @@ export function readIndirect(
 
 export const isStream = (o: unknown): o is PdfStream =>
   typeof o === 'object' && o !== null && (o as { t?: string }).t === 'stream';
-
-export { isRef };

@@ -7,8 +7,10 @@
  */
 import { PdfFile, Update } from './document.ts';
 import {
+  decodeText,
   dict,
   isDict,
+  isName,
   isRef,
   isStringLike,
   latin1,
@@ -20,7 +22,7 @@ import {
 } from './objects.ts';
 import { PdfReadError, isStream } from './parse.ts';
 import type { PdfStream } from './objects.ts';
-import { sha256Bytes } from './sha256.ts';
+import { sha256Bytes, toHex } from './sha256.ts';
 
 export type Relationship = 'Data' | 'Source' | 'Alternative' | 'Supplement' | 'Unspecified';
 
@@ -43,26 +45,6 @@ const clone = (d: PdfDict): PdfDict => ({ t: 'dict', entries: new Map(d.entries)
 function getDict(u: Update, o: PdfObject | undefined): PdfDict | undefined {
   const v = isRef(o) ? u.get(o) : o;
   return isStream(v) ? undefined : isDict(v as PdfObject) ? (v as PdfDict) : undefined;
-}
-
-/**
- * A PDF text string as text: UTF-16BE with byte order mark, UTF-8 with byte order mark (PDF 2.0; the mark is
- * dropped), else PDFDocEncoding (taken as Latin-1).
- */
-function decodeText(bytes: Uint8Array): string {
-  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
-    return new TextDecoder('utf-8').decode(bytes.subarray(3));
-  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-    if (bytes.length % 2 !== 0)
-      throw new PdfReadError('syntax', 'name tree key: odd UTF-16 length');
-    let out = '';
-    for (let i = 2; i < bytes.length; i += 2)
-      out += String.fromCharCode((bytes[i]! << 8) | bytes[i + 1]!);
-    return out;
-  }
-  let out = '';
-  for (const b of bytes) out += String.fromCharCode(b);
-  return out;
 }
 
 const keyText = (o: PdfObject | undefined): string => {
@@ -313,8 +295,7 @@ function shared(raw: Uint8Array, cache: StreamCache | undefined): Uint8Array {
   return raw;
 }
 
-const nameOf = (o: PdfObject | undefined): string | undefined =>
-  typeof o === 'object' && o !== null && !Array.isArray(o) && o.t === 'name' ? o.v : undefined;
+const nameOf = (o: PdfObject | undefined): string | undefined => (isName(o) ? o.v : undefined);
 
 function filterLabel(filter: PdfObject): string {
   const list = Array.isArray(filter) ? filter : [filter];
@@ -470,7 +451,7 @@ function extraFields(
     if (same) ufField = '\0same';
     else if (!isStream(us)) ufField = '\0nostream';
     else {
-      const h = Array.from(sha256Bytes(us.data), (b) => b.toString(16).padStart(2, '0')).join('');
+      const h = toHex(sha256Bytes(us.data));
       ufField = [
         h,
         show(file, us.dict.entries.get('Subtype')),
@@ -543,12 +524,12 @@ export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChan
   return out;
 }
 
+const dataHashes = new WeakMap<Uint8Array, Uint8Array>();
+
 /**
  * Digest over data (via its SHA-256), MIME type, relationship, description, filter, source and the `extras`
  * fields (length-prefixed). A malformed name tree key makes `attachmentChanges` throw (fail loud).
  */
-const dataHashes = new WeakMap<Uint8Array, Uint8Array>();
-
 function attachmentDigest(a: FoundAttachment): string {
   const enc = new TextEncoder();
   let dataHash = dataHashes.get(a.data);
@@ -572,5 +553,5 @@ function attachmentDigest(a: FoundAttachment): string {
     buf.set(f, at + 4);
     at += 4 + f.length;
   }
-  return Array.from(sha256Bytes(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+  return toHex(sha256Bytes(buf));
 }

@@ -81,7 +81,8 @@ export class PdfFile {
       end: readRevisionEnd(bytes, s.trailerEnd),
       trailer: s.trailer,
     }));
-    // Revisions must be appended one after the other; a linearized file is not (first-page section at the start).
+    // Revisions must be appended one after the other. A linearized file is not (first-page section at the
+    // start); the loop below refuses any revision that does not lie after its predecessor, whatever the cause.
     if (hasLinearizedDict(bytes))
       throw new PdfReadError('linearized', 'the first object is a /Linearized dictionary');
     for (let i = 1; i < this.revisions.length; i++)
@@ -299,7 +300,10 @@ export function writeUpdate(
   update: Update,
   trailerExtra: Record<string, PdfObject> = {},
 ): Written {
-  if (update.objects.size === 0) throw new Error('writeUpdate: the update has no objects');
+  // The getters return fresh copies: read each once, not per object.
+  const objects = update.objects;
+  const generations = update.generations;
+  if (objects.size === 0) throw new Error('writeUpdate: the update has no objects');
   for (const key of RESERVED_TRAILER)
     if (key in trailerExtra) throw new Error(`writeUpdate: trailerExtra must not set /${key}`);
   const base = file.bytes;
@@ -308,11 +312,11 @@ export function writeUpdate(
   // A new revision starts on a new line.
   const lead = base.length > 0 && base[base.length - 1] !== 0x0a ? '\n' : '';
   sink.push(lead);
-  const nums = [...update.objects.keys()].sort((a, b) => a - b);
+  const nums = [...objects.keys()].sort((a, b) => a - b);
   for (const num of nums) {
-    const o = update.objects.get(num)!;
+    const o = objects.get(num)!;
     offsets.set(num, base.length + sink.size);
-    sink.push(`${num} ${update.generations.get(num) ?? 0} obj\n`);
+    sink.push(`${num} ${generations.get(num) ?? 0} obj\n`);
     if (isStream(o)) {
       const d = { t: 'dict' as const, entries: new Map(o.dict.entries) };
       d.entries.set('Length', o.data.length);
@@ -343,7 +347,7 @@ export function writeUpdate(
     sink.push(`${nums[i]} ${j - i + 1}\n`);
     for (let k = i; k <= j; k++)
       sink.push(
-        `${String(offsets.get(nums[k]!)).padStart(10, '0')} ${String(update.generations.get(nums[k]!) ?? 0).padStart(5, '0')} n\r\n`,
+        `${String(offsets.get(nums[k]!)).padStart(10, '0')} ${String(generations.get(nums[k]!) ?? 0).padStart(5, '0')} n\r\n`,
       );
     i = j + 1;
   }

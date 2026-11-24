@@ -9,7 +9,9 @@ import {
   dict,
   findDocTimeStamps,
   isDict,
+  hex,
   isRef,
+  latin1,
   textString,
 } from '../src/index.ts';
 import type { PdfDict, PdfObject, PdfRef } from '../src/index.ts';
@@ -487,5 +489,32 @@ describe('revisionBytes and time stamps', () => {
       }
       expect(part.length).toBe(full.filter((t) => t.revision! <= i).length);
     }
+  });
+});
+
+describe('field names', () => {
+  it('lists a stamp whose Latin-1 /T has 300000 bytes, with the name decoded', async () => {
+    const base = await basePdf();
+    const long = 'a'.repeat(300000);
+    const pdf = appendRevision(base, (_f, u) => {
+      const field = u.add(
+        dict({
+          FT: name('Sig'),
+          T: latin1(long),
+          V: dict({
+            Type: name('DocTimeStamp'),
+            SubFilter: name('ETSI.RFC3161'),
+            ByteRange: [0, 0, 0, 0],
+            Contents: hex(new Uint8Array(8)),
+          }),
+        }),
+      );
+      const catalog = new Map(_f.catalog.entries);
+      catalog.set('AcroForm', dict({ Fields: [field] }));
+      u.set(_f.rootRef, { t: 'dict', entries: catalog });
+    });
+    const found = findDocTimeStamps(pdf);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.field).toBe(long);
   });
 });

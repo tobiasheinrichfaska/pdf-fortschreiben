@@ -142,12 +142,14 @@ export function sha256Bytes(message: Uint8Array): Uint8Array {
   return new Sha256().update(message).digest();
 }
 
-/** SHA-256 of a text (UTF-8) as 64 lower-case hex digits. */
-export function sha256Hex(text: string): string {
-  return [...sha256Bytes(new TextEncoder().encode(text))]
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+/** Bytes as lower-case hex digits. */
+export function toHex(bytes: Uint8Array): string {
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
 }
 
-export const isHash = (value: unknown): value is string =>
-  typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+/** SHA-256 of a text (UTF-8) as 64 lower-case hex digits. */
+export function sha256Hex(text: string): string {
+  return toHex(sha256Bytes(new TextEncoder().encode(text)));
+}

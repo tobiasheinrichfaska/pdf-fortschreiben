@@ -6,10 +6,12 @@
  */
 import { PdfFile, Update, writeUpdate } from './document.ts';
 import {
+  decodeText,
   dict,
   isDict,
   isName,
   isRef,
+  isStringLike,
   name,
   raw,
   textString,
@@ -17,7 +19,7 @@ import {
   type PdfObject,
 } from './objects.ts';
 import { PdfReadError, latin1Text } from './parse.ts';
-import { Sha256 } from './sha256.ts';
+import { Sha256, toHex } from './sha256.ts';
 
 /** Gets a DER TimeStampToken (CMS ContentInfo) for a SHA-256 digest, e.g. through a relay. */
 export type Stamper = (sha256: Uint8Array) => Promise<Uint8Array>;
@@ -59,6 +61,12 @@ export function derLength(bytes: Uint8Array): number | null {
   let len = 0;
   for (let i = 0; i < n; i++) len = len * 256 + bytes[2 + i]!;
   return 2 + n + len;
+}
+
+/** True if `bytes` start with one DER SEQUENCE (tag 0x30, definite length) that fits into them. */
+function isDerSequence(bytes: Uint8Array): boolean {
+  const len = derLength(bytes);
+  return bytes[0] === 0x30 && len !== null && len <= bytes.length;
 }
 
 /** A byte range of four non-negative integers: a = 0, b <= c, c + d <= length. */
@@ -147,17 +155,13 @@ export async function appendDocTimeStamp(
   for (let i = 0; i < rangeText.length; i++) bytes[brAt + i] = rangeText.charCodeAt(i);
 
   const token = await stamp(rangeDigest(bytes, range));
-  const len = derLength(token);
-  if (token[0] !== 0x30 || len === null || len !== token.length)
+  if (!isDerSequence(token) || derLength(token) !== token.length)
     throw new Error(
       'stamp: answer is not one DER SEQUENCE (DER is required, BER indefinite length is not accepted)',
     );
   if (token.length > reserve) throw new RangeError(`token (${token.length} B) exceeds reserve`);
-  const HEX = '0123456789ABCDEF';
-  for (let i = 0; i < token.length; i++) {
-    bytes[start + 1 + i * 2] = HEX.charCodeAt(token[i]! >> 4);
-    bytes[start + 2 + i * 2] = HEX.charCodeAt(token[i]! & 15);
-  }
+  const tokenHex = toHex(token).toUpperCase();
+  for (let i = 0; i < tokenHex.length; i++) bytes[start + 1 + i] = tokenHex.charCodeAt(i);
   return bytes;
 }
 
@@ -216,7 +220,7 @@ export function findDocTimeStamps(pdf: Uint8Array): FoundTimeStamp[] {
         const field = view.dict(f);
         if (field === undefined) return;
         const t = field.entries.get('T');
-        const own = isTextObject(t) ? decodeText(t.bytes) : '';
+        const own = isStringLike(t) ? decodeText(t.bytes) : '';
         const fieldName = prefix === '' ? own : own === '' ? prefix : `${prefix}.${own}`;
         const kids = view.resolve(field.entries.get('Kids'));
         if (Array.isArray(kids)) for (const k of kids) walk(k, fieldName, depth + 1);
@@ -269,12 +273,6 @@ function broken(num: number, field: string, e: unknown): FoundTimeStamp {
   };
 }
 
-const isTextObject = (t: unknown): t is { t: 'hex' | 'str'; bytes: Uint8Array } =>
-  typeof t === 'object' &&
-  t !== null &&
-  !Array.isArray(t) &&
-  ((t as { t?: string }).t === 'hex' || (t as { t?: string }).t === 'str');
-
 /** True if the bytes in `[b, c)` are the hex string `contents`, inside the body of object `num`. */
 function isOwnContents(bytes: Uint8Array, num: number, b: number, c: number, contents: Uint8Array) {
   const gap = latin1Text(bytes, b, c);
@@ -325,10 +323,7 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
     isOwnContents(bytes, num, b, c, contents.bytes);
   const len = derLength(contents.bytes);
   const tokenOk =
-    contents.bytes[0] === 0x30 &&
-    len !== null &&
-    len <= contents.bytes.length &&
-    contents.bytes.subarray(len).every((x) => x === 0);
+    isDerSequence(contents.bytes) && contents.bytes.subarray(len!).every((x) => x === 0);
   // SHA-256 is pure JS (a few MB/s per stamp over a big file): compute it on first access, once.
   let digest: Uint8Array | undefined;
   const found: FoundTimeStamp = {
@@ -344,14 +339,4 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
     tokenOk,
   };
   return found;
-}
-
-function decodeText(bytes: Uint8Array): string {
-  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
-    let s = '';
-    for (let i = 2; i + 1 < bytes.length; i += 2)
-      s += String.fromCharCode((bytes[i]! << 8) | bytes[i + 1]!);
-    return s;
-  }
-  return String.fromCharCode(...bytes);
 }
