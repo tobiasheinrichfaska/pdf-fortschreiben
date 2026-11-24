@@ -196,20 +196,57 @@ export interface FoundAttachment {
   readonly name: string;
   readonly mimeType: string | undefined;
   readonly relationship: string | undefined;
-  /** Decoded bytes; with `unsupportedFilter` the raw stream bytes. */
-  readonly data: Uint8Array;
+  /**
+   * Decoded bytes; with `unsupportedFilter` or `tooLarge` the raw stream bytes. **Read-only:** equal raw
+   * streams share one array (also across attachments and revisions when a `StreamCache` is passed), so a
+   * change here would show up in other entries.
+   */
+  readonly data: Readonly<Uint8Array>;
   readonly description?: string;
   /** Set when the stream has a filter other than a single `/FlateDecode`: `data` is then not decoded. */
   readonly unsupportedFilter?: boolean;
+  /**
+   * Set when inflating would exceed `maxInflatedBytes`: reading stopped early, `data` is the raw (still
+   * compressed) stream bytes and `filter` is set. `attachmentChanges` still compares such a file.
+   */
+  readonly tooLarge?: boolean;
   /** The stream's filter names joined by `,` (absent without a filter). */
   readonly filter?: string;
 }
 
-async function inflate(data: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([data as BlobPart])
+/** Default cap for one inflated attachment (decompression bomb guard). */
+export const DEFAULT_MAX_INFLATED_BYTES = 256 * 1024 * 1024;
+
+export interface ReadAttachmentsOptions {
+  /** Largest inflated size of one attachment (default 256 MiB); a larger one is returned raw with `tooLarge`. */
+  readonly maxInflatedBytes?: number;
+}
+
+/** Inflates `data`; `undefined` as soon as the output would exceed `max` bytes (the stream is cancelled). */
+async function inflate(data: Uint8Array, max: number): Promise<Uint8Array | undefined> {
+  const reader = new Blob([data as BlobPart])
     .stream()
-    .pipeThrough(new DecompressionStream('deflate'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+    .pipeThrough(new DecompressionStream('deflate'))
+    .getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) {
+      await reader.cancel();
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
 }
 
 /**
@@ -236,11 +273,16 @@ function remember(
   else bucket.push({ raw, data, inflated });
 }
 
-async function decoded(raw: Uint8Array, cache: StreamCache | undefined): Promise<Uint8Array> {
+/** The inflated bytes, or `undefined` when they exceed `max` (an over-size result is not cached). */
+async function decoded(
+  raw: Uint8Array,
+  cache: StreamCache | undefined,
+  max: number,
+): Promise<Uint8Array | undefined> {
   const hit = lookup(raw, true, cache);
-  if (hit !== undefined) return hit.data;
-  const data = await inflate(raw);
-  remember(cache, raw, data, true);
+  if (hit !== undefined) return hit.data.length > max ? undefined : hit.data;
+  const data = await inflate(raw, max);
+  if (data !== undefined) remember(cache, raw, data, true);
   return data;
 }
 
@@ -260,11 +302,17 @@ function filterLabel(filter: PdfObject): string {
   return list.map((f) => nameOf(f) ?? '?').join(',');
 }
 
-/** The embedded files of the newest revision (uncompressed or `/FlateDecode`), `/Kids` followed. */
+/**
+ * The embedded files of the newest revision (uncompressed or `/FlateDecode`), `/Kids` followed. A
+ * `/FlateDecode` stream that inflates beyond `options.maxInflatedBytes` is not decoded: reading stops at the
+ * cap and the entry carries the raw bytes with `tooLarge`.
+ */
 export async function readAttachments(
   file: PdfFile,
   cache?: StreamCache,
+  options: ReadAttachmentsOptions = {},
 ): Promise<FoundAttachment[]> {
+  const max = options.maxInflatedBytes ?? DEFAULT_MAX_INFLATED_BYTES;
   const names = file.dict(file.catalog.entries.get('Names'));
   const treeRef = names?.entries.get('EmbeddedFiles');
   const out: FoundAttachment[] = [];
@@ -277,15 +325,19 @@ export async function readAttachments(
     const stream = file.resolve(efRef);
     if (spec === undefined || !isStream(stream)) continue;
     const filter = stream.dict.entries.get('Filter');
-    let data = stream.data;
+    let data: Uint8Array = stream.data;
+    let tooLarge = false;
     let label: string | undefined;
     let unsupported = false;
     if (filter !== undefined) {
       label = filterLabel(filter);
-      if (label === 'FlateDecode') data = await decoded(stream.data, cache);
-      else unsupported = true;
+      if (label === 'FlateDecode') {
+        const d = await decoded(stream.data, cache, max);
+        if (d === undefined) tooLarge = true;
+        else data = d;
+      } else unsupported = true;
     }
-    if (unsupported || filter === undefined) data = shared(stream.data, cache);
+    if (unsupported || tooLarge || filter === undefined) data = shared(stream.data, cache);
     const desc = file.resolve(spec.entries.get('Desc'));
     out.push({
       name: key,
@@ -297,6 +349,7 @@ export async function readAttachments(
         : {}),
       ...(label === undefined ? {} : { filter: label }),
       ...(unsupported ? { unsupportedFilter: true } : {}),
+      ...(tooLarge ? { tooLarge: true } : {}),
     });
   }
   return out;

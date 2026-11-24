@@ -163,7 +163,9 @@ export class PdfFile {
 
   /**
    * This file as it stood at the end of revision `index` (a prefix of the bytes): up to and including the
-   * single line end after `%%EOF` (which a time stamp's `/ByteRange` covers), if there is one.
+   * single line end after `%%EOF` (which a time stamp's `/ByteRange` covers), if there is one. It is a prefix
+   * of the updated file, not necessarily byte-equal to the original base: it includes that line end, which
+   * may be the writer's own lead newline of the next revision.
    */
   revisionBytes(index: number): Uint8Array {
     const r = this.revisions[index];

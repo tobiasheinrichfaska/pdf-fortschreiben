@@ -7,6 +7,7 @@ export {
   attachmentChanges,
   readAttachments,
   type Attachment,
+  type ReadAttachmentsOptions,
   type AttachmentChange,
   type FoundAttachment,
   type Relationship,

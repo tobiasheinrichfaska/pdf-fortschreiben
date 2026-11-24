@@ -404,3 +404,40 @@ describe('very long strings', () => {
     expect(found[0]!.description).toBe(big);
   });
 });
+
+describe('inflate cap', () => {
+  const deflate = async (d: Uint8Array) =>
+    new Uint8Array(
+      await new Response(
+        new Blob([d as BlobPart]).stream().pipeThrough(new CompressionStream('deflate')),
+      ).arrayBuffer(),
+    );
+  const withFlate = (pdf: Uint8Array, raw: Uint8Array) =>
+    withNames(pdf, (u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain'), Filter: name('FlateDecode') }),
+        data: raw,
+      });
+      const s = u.add(dict({ Type: name('Filespec'), F: latin1('z.bin'), EF: dict({ F: ef }) }));
+      return dict({ EmbeddedFiles: dict({ Names: [latin1('z.bin'), s] }) });
+    });
+
+  it('returns a too large stream raw and flagged, and still compares it', async () => {
+    const raw = await deflate(new Uint8Array(5_000_000));
+    expect(raw.length).toBeLessThan(100_000);
+    const pdf = await withFlate(await basePdf(), raw);
+    const f = new PdfFile(pdf);
+    const small = await readAttachments(f, undefined, { maxInflatedBytes: 1_000_000 });
+    expect(small[0]).toMatchObject({ tooLarge: true, filter: 'FlateDecode' });
+    expect(small[0]!.data).toEqual(raw);
+    const all = await readAttachments(f, undefined, { maxInflatedBytes: 5_000_000 });
+    expect(all[0]!.tooLarge).toBeUndefined();
+    expect(all[0]!.data.length).toBe(5_000_000);
+    // a cached larger result does not leak past a smaller cap
+    const cache = new Map();
+    await readAttachments(f, cache);
+    expect((await readAttachments(f, cache, { maxInflatedBytes: 10 }))[0]!.tooLarge).toBe(true);
+    expect(await attachmentChanges(pdf)).toEqual([]);
+  });
+});
