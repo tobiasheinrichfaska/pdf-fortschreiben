@@ -10,6 +10,7 @@ export {
   type AttachmentChange,
   type FoundAttachment,
   type Relationship,
+  type StreamCache,
 } from './attach.ts';
 export {
   appendDocTimeStamp,

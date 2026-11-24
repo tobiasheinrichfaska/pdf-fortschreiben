@@ -29,8 +29,8 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 - **Attachments are add only** (decision Tobias 2026-11-24): every state is a new file with a new name, so the
   newest revision shows how each earlier state looked, and a removal or change is detectable
   (`attachmentChanges`).
-- **Only files with a classic xref table** are continued; xref streams, object streams and hybrid files are
-  refused with a code (`PdfReadError.code`). No general-purpose PDF parser.
+- **Only files with a classic xref table** are continued; xref streams, object streams and hybrid files and
+  encrypted files (`/Encrypt`) are refused with a code (`PdfReadError.code`). No general-purpose PDF parser.
 - Core imports nothing from `node:` and no `fetch`/`Buffer`/`process` (tests may).
 - Nothing is published, tagged or released without Tobias' OK.
 
@@ -38,9 +38,10 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 
 | File/Folder        | Purpose                                                                                                                                                                                            |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/objects.ts`   | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets) and serializer                                                                                                      |
+| `src/index.ts`     | Public exports and `appendRevision` (build one revision with a callback)                                                                                                                           |
+| `src/objects.ts`   | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets), serializer (`TextSink`), type guards                                                                               |
 | `src/parse.ts`     | Lexer, indirect objects, classic xref sections, `PdfReadError` codes                                                                                                                               |
-| `src/document.ts`  | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`), `Update`, `writeUpdate`                                                                                         |
+| `src/document.ts`  | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`; refuses `/Encrypt`), `Update` (read-only `objects`/`generations` copies), `writeUpdate`                          |
 | `src/attach.ts`    | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, **add only**: a used name is refused), `readAttachments`, `attachmentChanges` (files a later revision removed or changed) |
 | `src/timestamp.ts` | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest`                                                                   |
 | `src/sha256.ts`    | Synchronous SHA-256 (copied from `Zeiterfassung/src/logic/sha256.ts`)                                                                                                                              |
@@ -82,4 +83,10 @@ npm test
   attachment change it rates them `FORM_FILLING`. pyHanko has no rule for added attachments. The stamps stay
   intact; a viewer may still show a warning. The library's own check for removed or changed files is
   `attachmentChanges`.
+- `findDocTimeStamps` does not abort on a malformed stamp: the entry has `error`, `rangeOk` and `tokenOk` false.
+  `rangeOk` means the range covers everything up to the revision's end except exactly its own `/Contents`.
+- A `Stamper` answer must be one DER SEQUENCE; BER indefinite length is rejected. `derLength` only measures.
+- `readAttachments` decodes only uncompressed or single `FlateDecode` streams; others come back raw with
+  `unsupportedFilter` and `filter`. `attachFile` refuses name trees with `/Kids`, reading follows them.
+- Error types are mixed: `PdfReadError` (with `code`) for reading, `Error`/`RangeError` for usage errors.
 - The external check depends on `openssl`, `pdfsig` and pyHanko on the machine; see `scripts/`.

@@ -45,7 +45,11 @@ function arrayOf(u: Update, o: PdfObject | undefined): PdfObject[] {
   return Array.isArray(v) ? [...v] : [];
 }
 
-/** The byte length of a DER element at the start of `bytes` (null if it is not one). */
+/**
+ * The byte length (header and content) of the element at the start of `bytes`, read from its definite
+ * length (up to 4 length bytes); null if there is none (indefinite length, too short). It does not check
+ * that the length is minimal DER or that the content is well formed.
+ */
 export function derLength(bytes: Uint8Array): number | null {
   if (bytes.length < 2) return null;
   const first = bytes[1]!;
