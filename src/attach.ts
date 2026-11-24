@@ -216,35 +216,39 @@ async function inflate(data: Uint8Array): Promise<Uint8Array> {
  * Decoded stream bytes remembered across the revisions of one file, so each distinct stream is inflated and
  * hashed once. A hit needs byte-for-byte equal raw data (no hash collision can hide a change).
  */
-export type StreamCache = Map<number, { raw: Uint8Array; data: Uint8Array }[]>;
+export type StreamCache = Map<number, { raw: Uint8Array; data: Uint8Array; inflated: boolean }[]>;
 
 const sameBytes = (x: Uint8Array, y: Uint8Array): boolean => compareBytes(x, y) === 0;
 
-function lookup(raw: Uint8Array, cache: StreamCache | undefined) {
-  const bucket = cache?.get(raw.length);
-  return { bucket, hit: bucket?.find((e) => sameBytes(e.raw, raw)) };
+function lookup(raw: Uint8Array, inflated: boolean, cache: StreamCache | undefined) {
+  return cache?.get(raw.length)?.find((e) => e.inflated === inflated && sameBytes(e.raw, raw));
 }
 
-function remember(cache: StreamCache | undefined, raw: Uint8Array, data: Uint8Array): void {
+function remember(
+  cache: StreamCache | undefined,
+  raw: Uint8Array,
+  data: Uint8Array,
+  inflated: boolean,
+): void {
   if (cache === undefined) return;
   const bucket = cache.get(raw.length);
-  if (bucket === undefined) cache.set(raw.length, [{ raw, data }]);
-  else bucket.push({ raw, data });
+  if (bucket === undefined) cache.set(raw.length, [{ raw, data, inflated }]);
+  else bucket.push({ raw, data, inflated });
 }
 
 async function decoded(raw: Uint8Array, cache: StreamCache | undefined): Promise<Uint8Array> {
-  const hit = lookup(raw, cache).hit;
+  const hit = lookup(raw, true, cache);
   if (hit !== undefined) return hit.data;
   const data = await inflate(raw);
-  remember(cache, raw, data);
+  remember(cache, raw, data, true);
   return data;
 }
 
 /** The first-seen copy of `raw`, so equal streams share one array (and one hash). */
 function shared(raw: Uint8Array, cache: StreamCache | undefined): Uint8Array {
-  const hit = lookup(raw, cache).hit;
+  const hit = lookup(raw, false, cache);
   if (hit !== undefined) return hit.data;
-  remember(cache, raw, raw);
+  remember(cache, raw, raw, false);
   return raw;
 }
 
@@ -281,7 +285,7 @@ export async function readAttachments(
       if (label === 'FlateDecode') data = await decoded(stream.data, cache);
       else unsupported = true;
     }
-    if (unsupported) data = shared(stream.data, cache);
+    if (unsupported || filter === undefined) data = shared(stream.data, cache);
     const desc = file.resolve(spec.entries.get('Desc'));
     out.push({
       name: key,

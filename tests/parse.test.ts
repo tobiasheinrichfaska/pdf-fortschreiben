@@ -209,3 +209,10 @@ describe('hand-built classic files', () => {
     expect(codeOf(() => new PdfFile(build([catalog], (at) => at)))).toBe('xref-loop');
   });
 });
+
+describe('Lexer names', () => {
+  it('reads a 300000 byte name without a RangeError', () => {
+    const long = 'a'.repeat(300000);
+    expect(new Lexer(text('/' + long + ' ')).readObject()).toEqual({ t: 'name', v: long });
+  });
+});

@@ -1,4 +1,5 @@
 import { PDFDocument } from 'pdf-lib';
+import { describe, expect, it, vi } from 'vitest';
 import {
   PdfFile,
   PdfReadError,
@@ -14,6 +15,18 @@ import {
   type PdfObject,
 } from '../src/index.ts';
 import { ascii, basePdf, text } from './helpers.ts';
+
+const hashed = vi.hoisted(() => ({ big: 0 }));
+vi.mock('../src/sha256.ts', async (orig) => {
+  const real = await orig<typeof import('../src/sha256.ts')>();
+  return {
+    ...real,
+    sha256Bytes: (d: Uint8Array) => {
+      if (d.length >= 1000) hashed.big++;
+      return real.sha256Bytes(d);
+    },
+  };
+});
 
 const file = (n: string, body = '{}') => ({
   name: n,
@@ -321,5 +334,73 @@ describe('attachmentChanges reporting', () => {
     const r2 = version(r1, 'same', 'a', { Filter: name('bc') });
     expect(await attachmentChanges(r2)).toEqual([{ name: 'f.txt', kind: 'changed', revision: 2 }]);
     expect(await attachmentChanges(version(r1, 'same', 'ab', { Filter: name('c') }))).toEqual([]);
+  });
+});
+
+describe('attachmentChanges hashing of unfiltered attachments', () => {
+  it('hashes each distinct attachment once over 8 revisions', async () => {
+    let pdf = await basePdf();
+    for (let i = 0; i < 8; i++) {
+      const data = new Uint8Array(2000).fill(i + 1);
+      pdf = appendRevision(pdf, (f, u) =>
+        attachFile(f, u, { name: `a${i}.bin`, data, mimeType: 'application/octet-stream' }),
+      );
+    }
+    hashed.big = 0;
+    expect(await attachmentChanges(pdf)).toEqual([]);
+    expect(hashed.big).toBe(8);
+  });
+
+  it('does not mix an unfiltered stream with a deflated one of equal raw bytes', async () => {
+    const raw = new Uint8Array(
+      await new Response(
+        new Blob([text('hello hello hello') as BlobPart])
+          .stream()
+          .pipeThrough(new CompressionStream('deflate')),
+      ).arrayBuffer(),
+    );
+    const mk = (n: string, u: import('../src/index.ts').Update, filter: boolean) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({
+          Subtype: name('text/plain'),
+          ...(filter ? { Filter: name('FlateDecode') } : {}),
+        }),
+        data: raw,
+      });
+      return [
+        latin1(n),
+        u.add(dict({ Type: name('Filespec'), F: latin1(n), EF: dict({ F: ef }) })),
+      ];
+    };
+    const pdf = withNames(await basePdf(), (u) =>
+      dict({ EmbeddedFiles: dict({ Names: [...mk('a', u, false), ...mk('b', u, true)] }) }),
+    );
+    const found = await readAttachments(new PdfFile(pdf), new Map());
+    expect(found.find((a) => a.name === 'a')!.data).toEqual(raw);
+    expect(ascii(found.find((a) => a.name === 'b')!.data)).toBe('hello hello hello');
+  });
+});
+
+describe('very long strings', () => {
+  it('reads a 300000 byte /Desc and a 300000 byte name tree key back', async () => {
+    const big = 'x'.repeat(300000);
+    const pdf = appendRevision(await basePdf(), (f, u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain') }),
+        data: text('d'),
+      });
+      const s = u.add(
+        dict({ Type: name('Filespec'), F: latin1('k'), Desc: latin1(big), EF: dict({ F: ef }) }),
+      );
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.set('Names', dict({ EmbeddedFiles: dict({ Names: [latin1(big), s] }) }));
+      u.set(f.rootRef, cat);
+    });
+    const found = await readAttachments(new PdfFile(pdf));
+    expect(found).toHaveLength(1);
+    expect(found[0]!.name).toBe(big);
+    expect(found[0]!.description).toBe(big);
   });
 });

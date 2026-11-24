@@ -140,7 +140,7 @@ export class Lexer {
       }
     }
     // One char per byte (Latin-1), so every name round-trips byte-exact.
-    return { t: 'name', v: String.fromCharCode(...bytes) };
+    return { t: 'name', v: latin1Text(Uint8Array.from(bytes), 0, bytes.length) };
   }
 
   private readLiteral(): PdfObject {
