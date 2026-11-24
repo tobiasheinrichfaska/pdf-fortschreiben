@@ -6,9 +6,11 @@ import {
   appendDocTimeStamp,
   appendRevision,
   attachFile,
+  attachmentChanges,
   dict,
   findDocTimeStamps,
   latin1,
+  name,
   readAttachments,
   sha256Bytes,
 } from '../src/index.ts';
@@ -65,36 +67,60 @@ describe('revisions', () => {
 });
 
 describe('attachments', () => {
-  it('adds, replaces by name, and every revision keeps its own copy', async () => {
-    const base = await basePdf();
-    const r1 = appendRevision(base, (f, u) => {
-      attachFile(f, u, {
-        name: 'monat.json',
-        data: text('{"tag":1}'),
-        mimeType: 'application/json',
-        modified: 'D:20261101180000Z',
-      });
-      attachFile(f, u, { name: 'andere.txt', data: text('x'), mimeType: 'text/plain' });
+  const day = (n: number) => ({
+    name: `monat-tag-${n}.json`,
+    data: text(`{"tag":${n}}`),
+    mimeType: 'application/json',
+  });
+
+  it('adds a new file per state; every earlier state stays readable in the newest revision', async () => {
+    const r1 = appendRevision(await basePdf(), (f, u) => {
+      attachFile(f, u, { ...day(1), modified: 'D:20261101180000Z' });
     });
-    const r2 = appendRevision(r1, (f, u) => {
-      attachFile(f, u, {
-        name: 'monat.json',
-        data: text('{"tag":2}'),
-        mimeType: 'application/json',
-      });
-    });
+    const r2 = appendRevision(r1, (f, u) => attachFile(f, u, day(2)));
     const now = await readAttachments(new PdfFile(r2));
     expect(now.map((a) => [a.name, ascii(a.data), a.relationship])).toEqual([
-      ['andere.txt', 'x', 'Data'],
-      ['monat.json', '{"tag":2}', 'Data'],
+      ['monat-tag-1.json', '{"tag":1}', 'Data'],
+      ['monat-tag-2.json', '{"tag":2}', 'Data'],
     ]);
-    const f = new PdfFile(r2);
-    const before = await readAttachments(new PdfFile(f.revisionBytes(1)));
-    expect(before.find((a) => a.name === 'monat.json')?.data).toEqual(text('{"tag":1}'));
-    const catalog = f.catalog;
-    expect(Array.isArray(catalog.entries.get('AF')) && catalog.entries.get('AF')).toHaveLength(2);
-    // pdf-lib still opens it.
+    const af = new PdfFile(r2).catalog.entries.get('AF');
+    expect(Array.isArray(af) && af).toHaveLength(2);
+    expect(await attachmentChanges(r2)).toEqual([]);
     expect((await PDFDocument.load(r2)).getPageCount()).toBe(1);
+  });
+
+  it('refuses a name that is already in the file (nothing is replaced)', async () => {
+    const r1 = appendRevision(await basePdf(), (f, u) => attachFile(f, u, day(1)));
+    expect(() => appendRevision(r1, (f, u) => attachFile(f, u, day(1)))).toThrow('exists');
+  });
+
+  it('reports a file that a later revision removed or changed', async () => {
+    const r1 = appendRevision(await basePdf(), (f, u) => {
+      attachFile(f, u, day(1));
+      attachFile(f, u, day(2));
+    });
+    // Someone rewrites the catalog: tag 1 gone, tag 2 pointing to other bytes.
+    const forged = appendRevision(r1, (f, u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Type: name('EmbeddedFile') }),
+        data: text('{"tag":99}'),
+      });
+      const spec = u.add(
+        dict({ Type: name('Filespec'), F: latin1('monat-tag-2.json'), EF: dict({ F: ef }) }),
+      );
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.set(
+        'Names',
+        dict({ EmbeddedFiles: dict({ Names: [latin1('monat-tag-2.json'), spec] }) }),
+      );
+      cat.entries.set('AF', [spec]);
+      u.set(f.rootRef, cat);
+    });
+    expect(await attachmentChanges(forged)).toEqual([
+      { name: 'monat-tag-1.json', kind: 'removed', revision: 2 },
+      { name: 'monat-tag-2.json', kind: 'changed', revision: 2 },
+    ]);
   });
 });
 
@@ -103,12 +129,12 @@ describe('document time stamps', () => {
     const seen: Uint8Array[] = [];
     const base = await basePdf();
     const day1 = appendRevision(base, (f, u) =>
-      attachFile(f, u, { name: 'm.json', data: text('1'), mimeType: 'application/json' }),
+      attachFile(f, u, { name: 'm-1.json', data: text('1'), mimeType: 'application/json' }),
     );
     const s1 = await appendDocTimeStamp(day1, fakeStamper(seen), { reserve: 2048 });
     expect(prefixKept(day1, s1)).toBe(true);
     const day2 = appendRevision(s1, (f, u) =>
-      attachFile(f, u, { name: 'm.json', data: text('2'), mimeType: 'application/json' }),
+      attachFile(f, u, { name: 'm-2.json', data: text('2'), mimeType: 'application/json' }),
     );
     const s2 = await appendDocTimeStamp(day2, fakeStamper(seen), { reserve: 2048 });
 

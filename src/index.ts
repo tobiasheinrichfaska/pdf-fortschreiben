@@ -4,8 +4,10 @@ import { PdfFile, Update, writeUpdate } from './document.ts';
 export { PdfFile, Update, writeUpdate, type Revision, type Written } from './document.ts';
 export {
   attachFile,
+  attachmentChanges,
   readAttachments,
   type Attachment,
+  type AttachmentChange,
   type FoundAttachment,
   type Relationship,
 } from './attach.ts';

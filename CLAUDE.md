@@ -26,6 +26,9 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 
 - **Public repo (AGPLv3 + commercial):** no private project names, no real data, no credentials.
 - **Earlier bytes are never changed.** Every write is `old bytes + new revision`; tests check the prefix.
+- **Attachments are add only** (decision Tobias 2026-11-24): every state is a new file with a new name, so the
+  newest revision shows how each earlier state looked, and a removal or change is detectable
+  (`attachmentChanges`).
 - **Only files with a classic xref table** are continued; xref streams, object streams and hybrid files are
   refused with a code (`PdfReadError.code`). No general-purpose PDF parser.
 - Core imports nothing from `node:` and no `fetch`/`Buffer`/`process` (tests may).
@@ -33,17 +36,17 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 
 ## Project Directory
 
-| File/Folder        | Purpose                                                                                                                          |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `src/objects.ts`   | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets) and serializer                                    |
-| `src/parse.ts`     | Lexer, indirect objects, classic xref sections, `PdfReadError` codes                                                             |
-| `src/document.ts`  | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`), `Update`, `writeUpdate`                       |
-| `src/attach.ts`    | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, same name replaces), `readAttachments`                  |
-| `src/timestamp.ts` | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest` |
-| `src/sha256.ts`    | Synchronous SHA-256 (copied from `Zeiterfassung/src/logic/sha256.ts`)                                                            |
-| `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                             |
-| `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                      |
-| `HERAUSLOESEN.md`  | Steps to move this directory into its own repository (delete after doing it)                                                     |
+| File/Folder        | Purpose                                                                                                                                                                                            |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/objects.ts`   | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets) and serializer                                                                                                      |
+| `src/parse.ts`     | Lexer, indirect objects, classic xref sections, `PdfReadError` codes                                                                                                                               |
+| `src/document.ts`  | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`), `Update`, `writeUpdate`                                                                                         |
+| `src/attach.ts`    | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, **add only**: a used name is refused), `readAttachments`, `attachmentChanges` (files a later revision removed or changed) |
+| `src/timestamp.ts` | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest`                                                                   |
+| `src/sha256.ts`    | Synchronous SHA-256 (copied from `Zeiterfassung/src/logic/sha256.ts`)                                                                                                                              |
+| `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                               |
+| `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                        |
+| `HERAUSLOESEN.md`  | Steps to move this directory into its own repository (delete after doing it)                                                                                                                       |
 
 ## Tests
 
@@ -74,7 +77,9 @@ npm test
   both document time stamps of a two-day file pass `openssl ts -verify` and pyHanko 0.38.2
   (`INTACT:TRUSTED`); pikepdf opens the file with no syntax findings. `pdfsig` (poppler 24.02) lists the
   stamps but cannot validate `ETSI.RFC3161`. **pyHanko rates the day-1 stamp's following changes as
-  modification level `OTHER`** (catalog `/AF` and `/Names` changed because the attachment was replaced); with
-  no attachment change it rates them `FORM_FILLING`. The stamps stay intact; a viewer may still show a warning.
-  Whether a new attachment per day (unique name) rates better is untested.
+  modification level `OTHER`** because catalog `/Names`/`/AF` changed; this holds for replacing **and** for
+  adding a file with a new name (rechecked 2026-11-24 with add-only names: still `OTHER`); with no
+  attachment change it rates them `FORM_FILLING`. pyHanko has no rule for added attachments. The stamps stay
+  intact; a viewer may still show a warning. The library's own check for removed or changed files is
+  `attachmentChanges`.
 - The external check depends on `openssl`, `pdfsig` and pyHanko on the machine; see `scripts/`.

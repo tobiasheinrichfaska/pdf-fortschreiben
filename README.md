@@ -19,14 +19,15 @@ import {
   findDocTimeStamps,
 } from 'pdf-fortschreiben';
 
-// 1. Tagesstand: Anhang ersetzen (und, Sache der App, die sichtbare Seite ändern)
+// 1. Tagesstand: neuer Anhang mit neuem Namen (nur hinzufügen; ein vergebener Name wird abgelehnt)
 let pdf = appendRevision(pdf0, (file, update) =>
-  attachFile(file, update, { name: 'monat.json', data, mimeType: 'application/json' }),
+  attachFile(file, update, { name: 'monat-tag-03.json', data, mimeType: 'application/json' }),
 );
 // 2. Zeitstempel über den Gesamtstand; das Token holt die App (z. B. über den Zeitstempel-Weiterreicher)
 pdf = await appendDocTimeStamp(pdf, async (sha256) => holeToken(sha256));
 // 3. Prüfen: jeder Stempel, den die Datei je hatte, mit Revision, Bereich und Hash
 for (const t of findDocTimeStamps(pdf)) prüfeToken(t.token, t.digest); // z. B. verifyTimestampToken
+await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelöscht oder geändert
 ```
 
 ## Grenzen

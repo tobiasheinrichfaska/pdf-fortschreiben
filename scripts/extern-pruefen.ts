@@ -44,23 +44,24 @@ doc.setCreationDate(new Date('2026-11-01T00:00:00Z'));
 doc.setModificationDate(new Date('2026-11-01T00:00:00Z'));
 let pdf: Uint8Array = await doc.save({ useObjectStreams: false });
 
-const att = (s: string, mod: string) => (f: any, u: any) =>
+// Add only: every day's state is a new file with its own name.
+const att = (s: string, mod: string, day: number) => (f: any, u: any) =>
   attachFile(f, u, {
-    name: 'zeiterfassung-2026-11.json',
+    name: `monat-2026-11-tag-${String(day).padStart(2, '0')}.json`,
     data: te.encode(s),
     mimeType: 'application/json',
     modified: mod,
     relationship: 'Data',
   });
-pdf = appendRevision(pdf, att('{"tag":1}', 'D:20261101180000Z'));
+pdf = appendRevision(pdf, att('{"tag":1}', 'D:20261101180000Z', 1));
 pdf = await appendDocTimeStamp(pdf, stamper);
-pdf = appendRevision(pdf, att('{"tag":2}', 'D:20261102180000Z'));
+pdf = appendRevision(pdf, att('{"tag":2}', 'D:20261102180000Z', 2));
 pdf = await appendDocTimeStamp(pdf, stamper);
 writeFileSync(resolve(tmp, 'monat.pdf'), pdf);
 
 // Control for pyHanko's modification analysis: attach, stamp, stamp again with NO attachment change.
 let ctl: Uint8Array = await doc.save({ useObjectStreams: false });
-ctl = appendRevision(ctl, att('{"tag":1}', 'D:20261101180000Z'));
+ctl = appendRevision(ctl, att('{"tag":1}', 'D:20261101180000Z', 1));
 ctl = await appendDocTimeStamp(ctl, stamper);
 ctl = await appendDocTimeStamp(ctl, stamper);
 writeFileSync(resolve(tmp, 'kontrolle.pdf'), ctl);

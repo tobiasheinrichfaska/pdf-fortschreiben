@@ -1,7 +1,9 @@
 /**
  * Embedded files as PDF/A-3 associated files: an `/EmbeddedFile` stream, a `/Filespec` with
  * `/AFRelationship`, an entry in the catalog's `/Names /EmbeddedFiles` tree and in the catalog's `/AF`.
- * A file with the same name replaces the entry in the new revision; the earlier revisions keep theirs.
+ * **Add only:** a name can be used once; a later state is a new file with a new name, so every earlier
+ * state stays readable in the newest revision, and `attachmentChanges` reports a file that a later revision
+ * removed or changed.
  */
 import { PdfFile, Update } from './document.ts';
 import {
@@ -17,6 +19,7 @@ import {
   type PdfRef,
 } from './objects.ts';
 import { PdfReadError, isStream } from './parse.ts';
+import { sha256Bytes } from './sha256.ts';
 
 export type Relationship = 'Data' | 'Source' | 'Alternative' | 'Supplement' | 'Unspecified';
 
@@ -44,7 +47,7 @@ function getDict(u: Update, o: PdfObject | undefined): PdfDict | undefined {
 const keyText = (o: PdfObject | undefined): string | undefined =>
   isStringLike(o) ? String.fromCharCode(...o.bytes) : undefined;
 
-/** Adds (or replaces) an associated file in `update`. */
+/** Adds an associated file in `update`. A name already in the file is refused (nothing is replaced). */
 export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
   if (!PRINTABLE.test(a.name)) throw new Error('attachFile: name must be printable ASCII');
   if (!/^[\w.+-]+\/[\w.+-]+$/.test(a.mimeType)) throw new Error('attachFile: bad MIME type');
@@ -82,7 +85,8 @@ export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
   if (Array.isArray(oldPairs))
     for (let i = 0; i + 1 < oldPairs.length; i += 2) {
       const key = keyText(oldPairs[i]);
-      if (key !== undefined && key !== a.name) pairs.push({ key, value: oldPairs[i + 1]! });
+      if (key === a.name) throw new Error(`attachFile: "${a.name}" exists; use a new name`);
+      if (key !== undefined) pairs.push({ key, value: oldPairs[i + 1]! });
     }
   pairs.push({ key: a.name, value: spec });
   pairs.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
@@ -93,15 +97,13 @@ export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
   namesDict.entries.set('EmbeddedFiles', tree);
   cat.entries.set('Names', namesDict);
 
-  // /AF: keep the other files, drop an older one with the same name.
+  // /AF: keep every earlier file, add the new one.
   const oldAf = isRef(cat.entries.get('AF'))
     ? update.get(cat.entries.get('AF') as PdfRef)
     : cat.entries.get('AF');
   const af: PdfObject[] = [];
   if (Array.isArray(oldAf))
     for (const item of oldAf) {
-      const s = getDict(update, item);
-      if (s !== undefined && keyText(s.entries.get('F')) === a.name) continue;
       af.push(item);
     }
   af.push(spec);
@@ -167,4 +169,41 @@ export async function readAttachments(file: PdfFile): Promise<FoundAttachment[]>
     });
   }
   return out;
+}
+
+export interface AttachmentChange {
+  readonly name: string;
+  readonly kind: 'removed' | 'changed';
+  /** The first revision (index) in which the file is missing or different. */
+  readonly revision: number;
+}
+
+/**
+ * Files that an earlier revision had and a later one lost or changed (same name, other bytes). With
+ * add-only writing this list is empty; anything in it means someone rewrote history after the fact.
+ */
+export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChange[]> {
+  const file = new PdfFile(pdf);
+  const seen = new Map<string, string>();
+  const out: AttachmentChange[] = [];
+  const reported = new Set<string>();
+  for (let i = 0; i < file.revisions.length; i++) {
+    const now = new Map<string, string>();
+    for (const a of await readAttachments(new PdfFile(file.revisionBytes(i))))
+      now.set(a.name, hexDigest(a.data));
+    for (const [n, digest] of seen) {
+      if (reported.has(n)) continue;
+      const d = now.get(n);
+      if (d === undefined || d !== digest) {
+        out.push({ name: n, kind: d === undefined ? 'removed' : 'changed', revision: i });
+        reported.add(n);
+      }
+    }
+    for (const [n, d] of now) if (!seen.has(n)) seen.set(n, d);
+  }
+  return out;
+}
+
+function hexDigest(data: Uint8Array): string {
+  return Array.from(sha256Bytes(data), (b) => b.toString(16).padStart(2, '0')).join('');
 }
