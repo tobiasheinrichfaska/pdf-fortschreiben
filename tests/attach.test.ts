@@ -730,3 +730,248 @@ describe('/Limits of the /EmbeddedFiles root', () => {
     expect((await readAttachments(f)).map((a) => a.name).sort()).toEqual(['a.json', 'm', 'z.json']);
   });
 });
+
+describe('mutation guards: digest fields, predictors, cap, text decoding, duplicates', () => {
+  type Upd = import('../src/index.ts').Update;
+  const deflate = async (d: Uint8Array) =>
+    new Uint8Array(
+      await new Response(
+        new Blob([d as BlobPart]).stream().pipeThrough(new CompressionStream('deflate')),
+      ).arrayBuffer(),
+    );
+  const setCat = (
+    pdf: Uint8Array,
+    build: (u: Upd) => { names?: PdfObject; af?: PdfObject[] },
+  ): Uint8Array =>
+    appendRevision(pdf, (f, u) => {
+      const { names, af } = build(u);
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      if (names === undefined) cat.entries.delete('Names');
+      else cat.entries.set('Names', names);
+      if (af === undefined) cat.entries.delete('AF');
+      else cat.entries.set('AF', af);
+      u.set(f.rootRef, cat);
+    });
+  const changed = { name: 'f.txt', kind: 'changed', revision: 2 };
+
+  it('digests the source: tree entry moved to /AF only is a change', async () => {
+    const r1 = appendRevision(await basePdf(), (f, u) => attachFile(f, u, file('a.json')));
+    const r2 = appendRevision(r1, (f, u) => {
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.delete('Names');
+      u.set(f.rootRef, cat);
+    });
+    const found = await readAttachments(new PdfFile(r2));
+    expect(found.map((a) => [a.name, a.source])).toEqual([['a.json', 'af']]);
+    expect(await attachmentChanges(r2)).toEqual([{ name: 'a.json', kind: 'changed', revision: 2 }]);
+  });
+
+  it('length-prefixes MIME type and relationship: "json"+"Data" vs "jso"+"nData"', async () => {
+    const mk = (pdf: Uint8Array, mime: string, rel: string) =>
+      setCat(pdf, (u) => {
+        const ef = u.add({ t: 'stream', dict: dict({ Subtype: name(mime) }), data: text('same') });
+        const s = u.add(
+          dict({
+            Type: name('Filespec'),
+            F: latin1('f.txt'),
+            AFRelationship: name(rel),
+            EF: dict({ F: ef }),
+          }),
+        );
+        return { names: dict({ EmbeddedFiles: dict({ Names: [latin1('f.txt'), s] }) }) };
+      });
+    const r1 = mk(await basePdf(), 'application/json', 'Data');
+    expect(await attachmentChanges(mk(r1, 'application/json', 'Data'))).toEqual([]);
+    expect(await attachmentChanges(mk(r1, 'application/jso', 'nData'))).toEqual([changed]);
+  });
+
+  it('compares a separate /EF /UF stream by /Subtype and by /Type; odd /UF values do not throw', async () => {
+    const mk = (pdf: Uint8Array, sub: string, type: string | null, ufMode = 'stream') =>
+      setCat(pdf, (u) => {
+        const uf = u.add({
+          t: 'stream',
+          dict: dict({
+            Subtype: name(sub),
+            ...(type === null ? {} : { Type: name(type) }),
+          }),
+          data: text('same'),
+        });
+        const ef = u.add({
+          t: 'stream',
+          dict: dict({ Subtype: name('text/plain') }),
+          data: text('same'),
+        });
+        const efDict =
+          ufMode === 'stream'
+            ? dict({ F: ef, UF: uf })
+            : ufMode === 'null'
+              ? dict({ F: ef, UF: null as unknown as PdfObject })
+              : dict({ F: ef, UF: u.add(dict({})) });
+        const s = u.add(dict({ Type: name('Filespec'), F: latin1('f.txt'), EF: efDict }));
+        return { names: dict({ EmbeddedFiles: dict({ Names: [latin1('f.txt'), s] }) }) };
+      });
+    const r1 = mk(await basePdf(), 'text/plain', 'EmbeddedFile');
+    expect(await attachmentChanges(mk(r1, 'text/plain', 'EmbeddedFile'))).toEqual([]);
+    expect(await attachmentChanges(mk(r1, 'text/html', 'EmbeddedFile'))).toEqual([changed]);
+    expect(await attachmentChanges(mk(r1, 'text/plain', 'Other'))).toEqual([changed]);
+    expect(await attachmentChanges(mk(r1, 'text/plain', null))).toEqual([changed]);
+    for (const m of ['null', 'dict']) {
+      const odd = mk(await basePdf(), 'text/plain', null, m);
+      expect((await readAttachments(new PdfFile(odd))).map((a) => a.name)).toEqual(['f.txt']);
+      expect(await attachmentChanges(odd)).toEqual([]);
+      expect(await attachmentChanges(mk(odd, 'text/plain', null, m))).toEqual([]);
+    }
+  });
+
+  it('treats every kind of predictor as unsupported without trying to inflate', async () => {
+    const raw = await deflate(text('predicted'));
+    const cases: Record<string, (u: Upd) => Record<string, PdfObject>> = {
+      DP: () => ({ DP: dict({ Predictor: 12 }) }),
+      'array of a number': () => ({ DecodeParms: [5] }),
+      'indirect /Predictor': (u) => ({ DecodeParms: dict({ Predictor: u.add(12) }) }),
+      'indirect array element': (u) => ({
+        DecodeParms: [u.add(dict({ Predictor: 12 }))],
+      }),
+    };
+    const Real = globalThis.DecompressionStream;
+    let calls = 0;
+    globalThis.DecompressionStream = class extends Real {
+      constructor(format: CompressionFormat) {
+        super(format);
+        calls++;
+      }
+    } as typeof DecompressionStream;
+    try {
+      for (const [label, parms] of Object.entries(cases)) {
+        const pdf = setCat(await basePdf(), (u) => {
+          const ef = u.add({
+            t: 'stream',
+            dict: dict({
+              Subtype: name('text/plain'),
+              Filter: name('FlateDecode'),
+              ...parms(u),
+            }),
+            data: raw,
+          });
+          const s = u.add(dict({ Type: name('Filespec'), F: latin1('p'), EF: dict({ F: ef }) }));
+          return { names: dict({ EmbeddedFiles: dict({ Names: [latin1('p'), s] }) }) };
+        });
+        const [a] = await readAttachments(new PdfFile(pdf));
+        expect(a, label).toMatchObject({ unsupportedFilter: true, filter: 'FlateDecode' });
+        expect(a!.inflateError, label).toBeUndefined();
+        expect(a!.data, label).toEqual(raw);
+      }
+      const plain = setCat(await basePdf(), (u) => {
+        const ef = u.add({
+          t: 'stream',
+          dict: dict({
+            Subtype: name('text/plain'),
+            Filter: name('FlateDecode'),
+            DecodeParms: dict({ Predictor: u.add(1) }),
+          }),
+          data: raw,
+        });
+        const s = u.add(dict({ Type: name('Filespec'), F: latin1('p'), EF: dict({ F: ef }) }));
+        return { names: dict({ EmbeddedFiles: dict({ Names: [latin1('p'), s] }) }) };
+      });
+      const [b] = await readAttachments(new PdfFile(plain));
+      expect(b!.unsupportedFilter).toBeUndefined();
+      expect(ascii(b!.data)).toBe('predicted');
+    } finally {
+      globalThis.DecompressionStream = Real;
+    }
+    expect(calls).toBe(1);
+  });
+
+  it('decodes exactly maxInflatedBytes and refuses one byte more; an over-size result is not cached', async () => {
+    const raw = await deflate(new Uint8Array(1000));
+    const pdf = setCat(await basePdf(), (u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain'), Filter: name('FlateDecode') }),
+        data: raw,
+      });
+      const s = u.add(dict({ Type: name('Filespec'), F: latin1('z'), EF: dict({ F: ef }) }));
+      return { names: dict({ EmbeddedFiles: dict({ Names: [latin1('z'), s] }) }) };
+    });
+    const f = new PdfFile(pdf);
+    const exact = await readAttachments(f, undefined, { maxInflatedBytes: 1000 });
+    expect(exact[0]!.tooLarge).toBeUndefined();
+    expect(exact[0]!.data.length).toBe(1000);
+    const over = await readAttachments(f, undefined, { maxInflatedBytes: 999 });
+    expect(over[0]).toMatchObject({ tooLarge: true });
+    // cache hit: same boundary
+    const warm = new Map();
+    await readAttachments(f, warm);
+    expect(
+      (await readAttachments(f, warm, { maxInflatedBytes: 1000 }))[0]!.tooLarge,
+    ).toBeUndefined();
+    expect((await readAttachments(f, warm, { maxInflatedBytes: 999 }))[0]!.tooLarge).toBe(true);
+    // over-size first, then default with the same cache
+    const cache = new Map();
+    expect((await readAttachments(f, cache, { maxInflatedBytes: 1 }))[0]!.tooLarge).toBe(true);
+    const again = await readAttachments(f, cache);
+    expect(again[0]!.tooLarge).toBeUndefined();
+    expect(again[0]!.data.length).toBe(1000);
+  });
+
+  it('decodeText: a partial UTF-8 mark is Latin-1, an odd UTF-16 key is a syntax error', async () => {
+    const key = (b: number[]) =>
+      setCat(basePdfSync, (u) => ({
+        names: dict({
+          EmbeddedFiles: dict({ Names: [hex(Uint8Array.from(b)), spec(u, 'x', 'a')] }),
+        }),
+      }));
+    const basePdfSync = await basePdf();
+    const ok = await readAttachments(new PdfFile(key([0xef, 0xbb, 0x41])));
+    expect(ok.map((a) => a.name)).toEqual(['ï»A']);
+    const bad = key([0xfe, 0xff, 0x00, 0x41, 0x00]);
+    await expect(readAttachments(new PdfFile(bad))).rejects.toMatchObject({ code: 'syntax' });
+    await expect(readAttachments(new PdfFile(bad))).rejects.toBeInstanceOf(PdfReadError);
+  });
+
+  it('names a /AF-only file by /UF before /F', async () => {
+    const pdf = setCat(await basePdf(), (u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain') }),
+        data: text('x'),
+      });
+      const s = u.add(
+        dict({ Type: name('Filespec'), F: latin1('a'), UF: textString('b'), EF: dict({ F: ef }) }),
+      );
+      return { af: [s] };
+    });
+    expect((await readAttachments(new PdfFile(pdf))).map((a) => a.name)).toEqual(['b']);
+  });
+
+  it('reports a duplicated name once, however often it occurs', async () => {
+    const dup = (pdf: Uint8Array, times: number) =>
+      setCat(pdf, (u) => {
+        const pairs: PdfObject[] = [];
+        for (let i = 0; i < times; i++) pairs.push(latin1('a'), spec(u, 'a', `v${i}`));
+        return { names: dict({ EmbeddedFiles: dict({ Names: pairs }) }) };
+      });
+    expect(await attachmentChanges(dup(await basePdf(), 3))).toEqual([
+      { name: 'a', kind: 'changed', revision: 1 },
+    ]);
+    const r1 = dup(await basePdf(), 1);
+    const r2 = dup(r1, 2);
+    const r3 = dup(r2, 2);
+    expect(await attachmentChanges(r3)).toEqual([{ name: 'a', kind: 'changed', revision: 2 }]);
+  });
+
+  it('gives a non-empty inflateError for a corrupt stream', async () => {
+    const pdf = setCat(await basePdf(), (u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain'), Filter: name('FlateDecode') }),
+        data: Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]),
+      });
+      const s = u.add(dict({ Type: name('Filespec'), F: latin1('c'), EF: dict({ F: ef }) }));
+      return { names: dict({ EmbeddedFiles: dict({ Names: [latin1('c'), s] }) }) };
+    });
+    const [a] = await readAttachments(new PdfFile(pdf));
+    expect(a!.inflateError!.length).toBeGreaterThan(0);
+  });
+});
