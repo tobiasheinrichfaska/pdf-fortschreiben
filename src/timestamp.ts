@@ -17,7 +17,7 @@ import {
   type PdfObject,
 } from './objects.ts';
 import { PdfReadError, latin1Text } from './parse.ts';
-import { sha256Bytes } from './sha256.ts';
+import { Sha256 } from './sha256.ts';
 
 /** Gets a DER TimeStampToken (CMS ContentInfo) for a SHA-256 digest, e.g. through a relay. */
 export type Stamper = (sha256: Uint8Array) => Promise<Uint8Array>;
@@ -72,10 +72,10 @@ function validRange(length: number, range: readonly number[]): boolean {
 export function rangeDigest(bytes: Uint8Array, range: readonly number[]): Uint8Array {
   const [a, b, c, d] = range as [number, number, number, number];
   if (!validRange(bytes.length, range)) return new Uint8Array(0);
-  const joined = new Uint8Array(b + d);
-  joined.set(bytes.subarray(a, a + b), 0);
-  joined.set(bytes.subarray(c, c + d), b);
-  return sha256Bytes(joined);
+  return new Sha256()
+    .update(bytes.subarray(a, a + b))
+    .update(bytes.subarray(c, c + d))
+    .digest();
 }
 
 /**

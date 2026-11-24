@@ -445,3 +445,25 @@ describe('findDocTimeStamps: /ByteRange length', () => {
     expect(bad!.byteRange).toEqual([]);
   });
 });
+
+describe('rangeDigest', () => {
+  it('equals the node:crypto digest of the joined ranges', async () => {
+    const { createHash, randomBytes } = await import('node:crypto');
+    const { rangeDigest } = await import('../src/index.ts');
+    const bytes = new Uint8Array(randomBytes(1000));
+    for (const range of [
+      [0, 100, 300, 700],
+      [0, 63, 64, 936],
+      [0, 0, 500, 500],
+      [0, 1000, 1000, 0],
+      [0, 129, 400, 3],
+    ]) {
+      const [, b, c, d] = range as [number, number, number, number];
+      const joined = Buffer.concat([bytes.subarray(0, b), bytes.subarray(c, c + d)]);
+      expect(Buffer.from(rangeDigest(bytes, range)).toString('hex')).toBe(
+        createHash('sha256').update(joined).digest('hex'),
+      );
+    }
+    expect(rangeDigest(bytes, [0, 10, 5, 1])).toHaveLength(0);
+  });
+});
