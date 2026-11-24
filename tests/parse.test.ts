@@ -216,3 +216,23 @@ describe('Lexer names', () => {
     expect(new Lexer(text('/' + long + ' ')).readObject()).toEqual({ t: 'name', v: long });
   });
 });
+
+describe('readIndirect header position and generation', () => {
+  const body = '<< /A 1 >>\nendobj\n';
+  it('refuses an offset one byte into a longer header', () => {
+    const s = `%PDF\n12 0 obj\n${body}`;
+    const at = s.indexOf('12 0 obj');
+    expect(readIndirect(text(s), at, 12, (o) => o as number)).toBeTruthy();
+    expect(codeOf(() => readIndirect(text(s), at + 1, 2, (o) => o as number))).toBe(
+      'object-mismatch',
+    );
+  });
+
+  it('refuses a generation that differs from the xref entry', () => {
+    const s = `3 1 obj\n${body}`;
+    expect(readIndirect(text(s), 0, 3, (o) => o as number, 1)).toBeTruthy();
+    expect(codeOf(() => readIndirect(text(s), 0, 3, (o) => o as number, 0))).toBe(
+      'object-mismatch',
+    );
+  });
+});

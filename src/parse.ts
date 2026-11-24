@@ -246,6 +246,8 @@ export interface XrefSection {
   readonly at: number;
   readonly entries: Map<number, { offset: number; gen: number; inUse: boolean }>;
   readonly trailer: PdfDict;
+  /** Offset just after the trailer dictionary. */
+  readonly trailerEnd: number;
 }
 
 export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
@@ -304,7 +306,7 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
   if (!isDict(trailer)) throw new PdfReadError('syntax', 'trailer');
   if (trailer.entries.has('XRefStm'))
     throw new PdfReadError('xref-stream', 'hybrid file with /XRefStm');
-  return { at, entries, trailer };
+  return { at, entries, trailer, trailerEnd: lx.pos };
 }
 
 /** The offset the last `startxref` (before `end`) points to. */
@@ -319,18 +321,42 @@ export function lastStartxref(buf: Uint8Array, end = buf.length): number {
   return n;
 }
 
-/** Reads the object `num` at `offset`: either a plain object or a stream. */
+/**
+ * The offset just after the `%%EOF` that ends the revision whose trailer dictionary ends at `trailerEnd`:
+ * `startxref`, an integer and `%%EOF` must follow (white space and comments may lie between).
+ */
+export function readRevisionEnd(buf: Uint8Array, trailerEnd: number): number {
+  const lx = new Lexer(buf, trailerEnd);
+  lx.expectWord('startxref');
+  if (!/^\d+$/.test(lx.word())) throw new PdfReadError('syntax', `startxref value at ${lx.pos}`);
+  for (;;) {
+    while (lx.pos < buf.length && isWhite(buf[lx.pos]!)) lx.pos++;
+    if (latin1Text(buf, lx.pos, lx.pos + 5) === '%%EOF') return lx.pos + 5;
+    if (buf[lx.pos] !== 0x25) throw new PdfReadError('syntax', `no %%EOF at ${lx.pos}`);
+    while (lx.pos < buf.length && buf[lx.pos] !== 0x0a && buf[lx.pos] !== 0x0d) lx.pos++;
+  }
+}
+
+/**
+ * Reads the object `num` at `offset`: either a plain object or a stream. The header must start at
+ * `offset` (not inside a longer number) and carry `gen` when that is given.
+ */
 export function readIndirect(
   buf: Uint8Array,
   offset: number,
   num: number,
   resolveLength: (o: PdfObject) => number,
+  gen?: number,
 ): PdfObject | PdfStream {
-  const lx = new Lexer(buf, offset);
-  const n = Number(lx.word());
-  lx.word();
-  if (lx.word() !== 'obj' || n !== num)
+  const mismatch = (): never => {
     throw new PdfReadError('object-mismatch', `object ${num} not at ${offset}`);
+  };
+  if (offset > 0 && !isWhite(buf[offset - 1]!) && !isDelim(buf[offset - 1]!)) mismatch();
+  const lx = new Lexer(buf, offset);
+  const nWord = lx.word();
+  const gWord = lx.word();
+  if (!/^\d+$/.test(nWord) || !/^\d+$/.test(gWord) || lx.word() !== 'obj') mismatch();
+  if (Number(nWord) !== num || (gen !== undefined && Number(gWord) !== gen)) mismatch();
   const value = lx.readObject();
   if (lx.peekWord() === 'stream' && isDict(value)) {
     lx.word();

@@ -3,6 +3,9 @@ import {
   PdfReadError,
   Update,
   appendRevision,
+  attachFile,
+  attachmentChanges,
+  latin1,
   dict,
   name,
   ref,
@@ -311,5 +314,32 @@ describe('writeUpdate error context', () => {
     const u2 = new Update(f);
     const r2 = u2.add(bad);
     expect(() => writeUpdate(f, u2)).toThrow(`object ${r2.num}: write: unknown object`);
+  });
+});
+
+describe('revision end', () => {
+  it('ignores a %%EOF inside the trailer and still sees a removed attachment', async () => {
+    const r1 = appendRevision(await base(), (f, u) =>
+      attachFile(f, u, { name: 'a.txt', data: latin1Bytes('x'), mimeType: 'text/plain' }),
+    );
+    const f1 = new PdfFile(r1);
+    const u = new Update(f1);
+    const cat = new Map(f1.catalog.entries);
+    cat.delete('Names');
+    cat.delete('AF');
+    u.set(f1.rootRef, { t: 'dict', entries: cat });
+    const r2 = writeUpdate(f1, u, { Foo: latin1('%%EOF') }).bytes;
+    const f2 = new PdfFile(r2);
+    expect(f2.revisions).toHaveLength(3);
+    expect(f2.revisions[2]!.end).toBe(r2.length - 1);
+    expect(f2.revisionBytes(2)).toHaveLength(r2.length);
+    expect(await attachmentChanges(r2)).toEqual([{ name: 'a.txt', kind: 'removed', revision: 2 }]);
+  });
+
+  it('refuses a revision without startxref and %%EOF after the trailer', async () => {
+    const pdf = await base();
+    const s = ascii(pdf);
+    const cut = latin1Bytes(s.slice(0, s.lastIndexOf('startxref')) + 'startxref\n1\n');
+    expect(() => new PdfFile(cut)).toThrow(PdfReadError);
   });
 });

@@ -16,10 +16,10 @@ import {
 } from './objects.ts';
 import {
   PdfReadError,
-  indexOf,
   isStream,
   lastStartxref,
   readIndirect,
+  readRevisionEnd,
   readXrefSection,
   type XrefSection,
 } from './parse.ts';
@@ -67,7 +67,7 @@ export class PdfFile {
         throw new PdfReadError('encrypted', 'the trailer has /Encrypt');
     this.revisions = sections.map((s) => ({
       xrefAt: s.at,
-      end: revisionEnd(bytes, s.at),
+      end: readRevisionEnd(bytes, s.trailerEnd),
       trailer: s.trailer,
     }));
     for (const s of sections)
@@ -115,11 +115,17 @@ export class PdfFile {
       );
     const hit = this.cache.get(r.num);
     if (hit !== undefined) return hit;
-    const o = readIndirect(this.bytes, e.offset, r.num, (len) => {
-      const v = isRef(len) ? this.object(len) : len;
-      if (typeof v !== 'number') throw new PdfReadError('syntax', `stream length of ${r.num}`);
-      return v;
-    });
+    const o = readIndirect(
+      this.bytes,
+      e.offset,
+      r.num,
+      (len) => {
+        const v = isRef(len) ? this.object(len) : len;
+        if (typeof v !== 'number') throw new PdfReadError('syntax', `stream length of ${r.num}`);
+        return v;
+      },
+      e.gen,
+    );
     this.cache.set(r.num, o);
     return o;
   }
@@ -175,11 +181,6 @@ export class PdfFile {
     else if (this.bytes[end] === 0x0a || this.bytes[end] === 0x0d) end += 1;
     return this.bytes.subarray(0, end);
   }
-}
-
-function revisionEnd(bytes: Uint8Array, xrefAt: number): number {
-  const eof = indexOf(bytes, '%%EOF', xrefAt);
-  return eof < 0 ? bytes.length : eof + 5;
 }
 
 /** The objects of one new revision. */
