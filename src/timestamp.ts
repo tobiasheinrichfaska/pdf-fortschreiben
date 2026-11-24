@@ -220,7 +220,7 @@ export function findDocTimeStamps(pdf: Uint8Array): FoundTimeStamp[] {
         const field = view.dict(f);
         if (field === undefined) return;
         const t = field.entries.get('T');
-        const own = isStringLike(t) ? decodeText(t.bytes) : '';
+        const own = isStringLike(t) ? lenientText(t.bytes) : '';
         const fieldName = prefix === '' ? own : own === '' ? prefix : `${prefix}.${own}`;
         const kids = view.resolve(field.entries.get('Kids'));
         if (Array.isArray(kids)) for (const k of kids) walk(k, fieldName, depth + 1);
@@ -257,6 +257,17 @@ export function findDocTimeStamps(pdf: Uint8Array): FoundTimeStamp[] {
   }
   const at = (x: FoundTimeStamp): number => x.byteRange[2] ?? Number.MAX_SAFE_INTEGER;
   return [...found.values()].sort((a, b) => at(a) - at(b));
+}
+
+/** Like `decodeText`, but never throws: a malformed UTF-16 string falls back to the bytes as Latin-1. */
+function lenientText(bytes: Uint8Array): string {
+  try {
+    return decodeText(bytes);
+  } catch {
+    let out = '';
+    for (const b of bytes) out += String.fromCharCode(b);
+    return out;
+  }
 }
 
 function broken(num: number, field: string, e: unknown): FoundTimeStamp {

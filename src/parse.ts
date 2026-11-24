@@ -323,12 +323,17 @@ export function readIndirect(
     throw new PdfReadError('object-mismatch', `object ${num} not at ${offset}`);
   };
   // The byte before the header must separate it from the previous token. Exception: a revision appended
-  // directly after an EOL-less `%%EOF` (pyHanko after a pdf-lib file) starts right behind those 5 bytes.
+  // directly after an EOL-less `%%EOF` (pyHanko after a pdf-lib file) starts right behind those 5 bytes. That `%%EOF` must start the file or a line, else it is
+  // the tail of some other token (`x%%EOF5 0 obj`, `(abc%%EOF5 0 obj`).
   if (
     offset > 0 &&
     !isWhite(buf[offset - 1]!) &&
     !isDelim(buf[offset - 1]!) &&
-    !(offset >= 5 && latin1Text(buf, offset - 5, offset) === '%%EOF')
+    !(
+      offset >= 5 &&
+      latin1Text(buf, offset - 5, offset) === '%%EOF' &&
+      (offset === 5 || buf[offset - 6] === 0x0a || buf[offset - 6] === 0x0d)
+    )
   )
     mismatch();
   const lx = new Lexer(buf, offset);

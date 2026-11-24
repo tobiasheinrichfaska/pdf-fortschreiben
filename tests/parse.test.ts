@@ -244,6 +244,23 @@ describe('readIndirect header position and generation', () => {
   });
 });
 
+describe('readIndirect after %%EOF', () => {
+  const body = '<< /A 1 >>\nendobj\n';
+  const at = (s: string): number => s.indexOf('5 0 obj');
+  const read = (s: string) => readIndirect(text(s), at(s), 5, (o) => o as number);
+
+  it('accepts a glued revision after an EOL-less %%EOF that starts a line or the file', () => {
+    expect(read(`%PDF\n%%EOF5 0 obj\n${body}`)).toBeTruthy();
+    expect(read(`%PDF\r%%EOF5 0 obj\n${body}`)).toBeTruthy();
+    expect(read(`%%EOF5 0 obj\n${body}`)).toBeTruthy();
+  });
+
+  it('refuses a %%EOF that is the tail of another token', () => {
+    expect(codeOf(() => read(`%PDF\nx%%EOF5 0 obj\n${body}`))).toBe('object-mismatch');
+    expect(codeOf(() => read(`%PDF\n(abc%%EOF5 0 obj\n${body}`))).toBe('object-mismatch');
+  });
+});
+
 describe('readRevisionEnd', () => {
   const end = (s: string): number => readRevisionEnd(text(s), 0);
 

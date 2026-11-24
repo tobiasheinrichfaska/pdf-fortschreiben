@@ -517,4 +517,31 @@ describe('field names', () => {
     expect(found).toHaveLength(1);
     expect(found[0]!.field).toBe(long);
   });
+
+  it('lists a stamp whose /T is an odd-length UTF-16 string, named by its bytes', async () => {
+    const base = await basePdf();
+    const stamp = () =>
+      dict({
+        Type: name('DocTimeStamp'),
+        SubFilter: name('ETSI.RFC3161'),
+        ByteRange: [0, 0, 0, 0],
+        Contents: hex(new Uint8Array(8)),
+      });
+    const pdf = appendRevision(base, (f, u) => {
+      const field = u.add(
+        dict({
+          FT: name('Sig'),
+          T: hex(Uint8Array.from([0xfe, 0xff, 0x00, 0x41, 0x00])),
+          V: stamp(),
+        }),
+      );
+      const catalog = new Map(f.catalog.entries);
+      catalog.set('AcroForm', dict({ Fields: [field] }));
+      u.set(f.rootRef, { t: 'dict', entries: catalog });
+    });
+    const found = findDocTimeStamps(pdf);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.error).toBeUndefined();
+    expect(found[0]!.field).toBe('\u00fe\u00ff\u0000A\u0000');
+  });
 });
