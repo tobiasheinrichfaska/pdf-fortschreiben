@@ -65,8 +65,16 @@ const keyText = (o: PdfObject | undefined): string => {
   return decodeText(o.bytes);
 };
 
+/** Byte-wise comparison (unsigned, shorter prefix first), the order a PDF name tree requires. */
+function compareBytes(x: Uint8Array, y: Uint8Array): number {
+  const n = Math.min(x.length, y.length);
+  for (let i = 0; i < n; i++) if (x[i] !== y[i]) return x[i]! - y[i]!;
+  return x.length - y.length;
+}
 interface Pair {
   readonly key: string;
+  /** The key's raw bytes (the PDF sort order is the byte order of these). */
+  readonly keyBytes: Uint8Array;
   /** The key object as the file has it (kept byte for byte when rewriting). */
   readonly keyObject: PdfObject;
   readonly value: PdfObject;
@@ -107,7 +115,12 @@ function treePairs(
     if (arr.length % 2 !== 0)
       throw new PdfReadError('syntax', 'name tree /Names has an odd length');
     for (let i = 0; i < arr.length; i += 2)
-      out.push({ key: keyText(arr[i]), keyObject: arr[i]!, value: arr[i + 1]! });
+      out.push({
+        key: keyText(arr[i]),
+        keyBytes: (arr[i] as { bytes: Uint8Array }).bytes,
+        keyObject: arr[i]!,
+        value: arr[i + 1]!,
+      });
   }
   return out;
 }
@@ -155,8 +168,9 @@ export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
     treeObj === undefined ? [] : treePairs(resolve, namesDict.entries.get('EmbeddedFiles'), false);
   if (pairs.some((p) => p.key === a.name))
     throw new Error(`attachFile: "${a.name}" exists; use a new name`);
-  pairs.push({ key: a.name, keyObject: latin1(a.name), value: spec });
-  pairs.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
+  const newKey = latin1(a.name);
+  pairs.push({ key: a.name, keyBytes: newKey.bytes, keyObject: newKey, value: spec });
+  pairs.sort((x, y) => compareBytes(x.keyBytes, y.keyBytes));
   tree.entries.set(
     'Names',
     pairs.flatMap((p) => [p.keyObject, p.value]),
@@ -198,6 +212,42 @@ async function inflate(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
+/**
+ * Decoded stream bytes remembered across the revisions of one file, so each distinct stream is inflated and
+ * hashed once. A hit needs byte-for-byte equal raw data (no hash collision can hide a change).
+ */
+export type StreamCache = Map<number, { raw: Uint8Array; data: Uint8Array }[]>;
+
+const sameBytes = (x: Uint8Array, y: Uint8Array): boolean => compareBytes(x, y) === 0;
+
+function lookup(raw: Uint8Array, cache: StreamCache | undefined) {
+  const bucket = cache?.get(raw.length);
+  return { bucket, hit: bucket?.find((e) => sameBytes(e.raw, raw)) };
+}
+
+function remember(cache: StreamCache | undefined, raw: Uint8Array, data: Uint8Array): void {
+  if (cache === undefined) return;
+  const bucket = cache.get(raw.length);
+  if (bucket === undefined) cache.set(raw.length, [{ raw, data }]);
+  else bucket.push({ raw, data });
+}
+
+async function decoded(raw: Uint8Array, cache: StreamCache | undefined): Promise<Uint8Array> {
+  const hit = lookup(raw, cache).hit;
+  if (hit !== undefined) return hit.data;
+  const data = await inflate(raw);
+  remember(cache, raw, data);
+  return data;
+}
+
+/** The first-seen copy of `raw`, so equal streams share one array (and one hash). */
+function shared(raw: Uint8Array, cache: StreamCache | undefined): Uint8Array {
+  const hit = lookup(raw, cache).hit;
+  if (hit !== undefined) return hit.data;
+  remember(cache, raw, raw);
+  return raw;
+}
+
 const nameOf = (o: PdfObject | undefined): string | undefined =>
   typeof o === 'object' && o !== null && !Array.isArray(o) && o.t === 'name' ? o.v : undefined;
 
@@ -207,7 +257,10 @@ function filterLabel(filter: PdfObject): string {
 }
 
 /** The embedded files of the newest revision (uncompressed or `/FlateDecode`), `/Kids` followed. */
-export async function readAttachments(file: PdfFile): Promise<FoundAttachment[]> {
+export async function readAttachments(
+  file: PdfFile,
+  cache?: StreamCache,
+): Promise<FoundAttachment[]> {
   const names = file.dict(file.catalog.entries.get('Names'));
   const treeRef = names?.entries.get('EmbeddedFiles');
   const out: FoundAttachment[] = [];
@@ -225,9 +278,10 @@ export async function readAttachments(file: PdfFile): Promise<FoundAttachment[]>
     let unsupported = false;
     if (filter !== undefined) {
       label = filterLabel(filter);
-      if (label === 'FlateDecode') data = await inflate(data);
+      if (label === 'FlateDecode') data = await decoded(stream.data, cache);
       else unsupported = true;
     }
+    if (unsupported) data = shared(stream.data, cache);
     const desc = file.resolve(spec.entries.get('Desc'));
     out.push({
       name: key,
@@ -260,9 +314,10 @@ export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChan
   const seen = new Map<string, string>();
   const out: AttachmentChange[] = [];
   const reported = new Set<string>();
+  const cache: StreamCache = new Map();
   for (let i = 0; i < file.revisions.length; i++) {
     const now = new Map<string, string>();
-    for (const a of await readAttachments(new PdfFile(file.revisionBytes(i))))
+    for (const a of await readAttachments(new PdfFile(file.revisionBytes(i)), cache))
       now.set(a.name, attachmentDigest(a));
     for (const [n, digest] of seen) {
       if (reported.has(n)) continue;
@@ -277,11 +332,18 @@ export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChan
   return out;
 }
 
-/** Digest over data, MIME type, relationship, description and filter (length-prefixed fields). */
+/** Digest over data (via its SHA-256), MIME type, relationship, description and filter (length-prefixed fields). */
+const dataHashes = new WeakMap<Uint8Array, Uint8Array>();
+
 function attachmentDigest(a: FoundAttachment): string {
   const enc = new TextEncoder();
+  let dataHash = dataHashes.get(a.data);
+  if (dataHash === undefined) {
+    dataHash = sha256Bytes(a.data);
+    dataHashes.set(a.data, dataHash);
+  }
   const fields: Uint8Array[] = [
-    a.data,
+    dataHash,
     enc.encode(a.mimeType ?? '\0none'),
     enc.encode(a.relationship ?? '\0none'),
     enc.encode(a.description ?? '\0none'),

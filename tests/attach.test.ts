@@ -54,10 +54,10 @@ describe('name tree keys', () => {
     const next = appendRevision(base, (f, u) => attachFile(f, u, file('neu.json')));
     const f2 = new PdfFile(next);
     const names = (await readAttachments(f2)).map((a) => a.name);
-    expect(names).toEqual(['alt.txt', 'neu.json']);
+    expect(names).toEqual(['neu.json', 'alt.txt']); // raw bytes: 'n' (6E) before FE FF
     const tree = f2.dict(f2.dict(f2.catalog.entries.get('Names'))!.entries.get('EmbeddedFiles'))!;
     const pairs = tree.entries.get('Names') as PdfObject[];
-    expect((pairs[0] as { t: string }).t).toBe('hex');
+    expect((pairs[2] as { t: string }).t).toBe('hex');
     expect(ascii(next)).toContain('<FEFF');
   });
 
@@ -101,8 +101,8 @@ describe('indirect name tree parts', () => {
     expect(() => appendRevision(pdf, (f, u) => attachFile(f, u, file('a.txt')))).toThrow('exists');
     const next = appendRevision(pdf, (f, u) => attachFile(f, u, file('b.json')));
     expect((await readAttachments(new PdfFile(next))).map((a) => a.name)).toEqual([
-      'a.txt',
       'b.json',
+      'a.txt',
     ]);
   });
 
@@ -187,5 +187,60 @@ describe('attachmentChanges', () => {
     expect(await attachmentChanges(r1)).toEqual([]);
     const r2 = forge(r1, 'd', 'text/plain', 'Data', { Filter: name('ASCIIHexDecode') });
     expect(await attachmentChanges(r2)).toEqual([{ name: 'f.txt', kind: 'changed', revision: 2 }]);
+  });
+});
+
+describe('name tree order', () => {
+  it('sorts by raw key bytes: ASCII keys before pdf-lib UTF-16 (FE FF) keys', async () => {
+    const doc = await PDFDocument.create();
+    doc.addPage();
+    await doc.attach(text('z'), 'Zebra.txt', { mimeType: 'text/plain' });
+    await doc.attach(text('m'), 'Mango.txt', { mimeType: 'text/plain' });
+    const base = new Uint8Array(await doc.save({ useObjectStreams: false }));
+    const out = appendRevision(base, (f, u) => attachFile(f, u, file('a.txt')));
+    const names = (await readAttachments(new PdfFile(out))).map((x) => x.name);
+    expect(names[0]).toBe('a.txt');
+    expect([...names].sort()).toEqual(['Mango.txt', 'Zebra.txt', 'a.txt']);
+    expect(new Set(names.slice(1))).toEqual(new Set(['Mango.txt', 'Zebra.txt']));
+  });
+});
+
+describe('attachmentChanges cost', () => {
+  it('inflates each distinct stream once, however many revisions follow', async () => {
+    const deflate = async (d: Uint8Array) =>
+      new Uint8Array(
+        await new Response(
+          new Blob([d as BlobPart]).stream().pipeThrough(new CompressionStream('deflate')),
+        ).arrayBuffer(),
+      );
+    const packed = [await deflate(text('one')), await deflate(text('two'))];
+    let pdf = withNames(await basePdf(), (u) => {
+      const pairs: PdfObject[] = [];
+      packed.forEach((data, i) => {
+        const ef = u.add({
+          t: 'stream',
+          dict: dict({ Subtype: name('text/plain'), Filter: name('FlateDecode') }),
+          data,
+        });
+        const s = u.add(dict({ Type: name('Filespec'), F: latin1(`f${i}`), EF: dict({ F: ef }) }));
+        pairs.push(latin1(`f${i}`), s);
+      });
+      return dict({ EmbeddedFiles: dict({ Names: pairs }) });
+    });
+    for (let i = 0; i < 4; i++) pdf = appendRevision(pdf, (f, u) => u.set(f.rootRef, f.catalog));
+    const Real = globalThis.DecompressionStream;
+    let calls = 0;
+    globalThis.DecompressionStream = class extends Real {
+      constructor(format: CompressionFormat) {
+        super(format);
+        calls++;
+      }
+    } as typeof DecompressionStream;
+    try {
+      expect(await attachmentChanges(pdf)).toEqual([]);
+    } finally {
+      globalThis.DecompressionStream = Real;
+    }
+    expect(calls).toBe(2);
   });
 });
