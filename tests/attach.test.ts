@@ -441,3 +441,98 @@ describe('inflate cap', () => {
     expect(await attachmentChanges(pdf)).toEqual([]);
   });
 });
+
+describe('UTF-8 key and duplicate hardening', () => {
+  const utf8Key = (s: string) => hex(Uint8Array.from([0xef, 0xbb, 0xbf, ...text(s)]));
+  const deflate = async (d: Uint8Array) =>
+    new Uint8Array(
+      await new Response(
+        new Blob([d as BlobPart]).stream().pipeThrough(new CompressionStream('deflate')),
+      ).arrayBuffer(),
+    );
+  const flateFile = (
+    pdf: Uint8Array,
+    raw: Uint8Array,
+    extra: Record<string, PdfObject> = {},
+    n = 'z.bin',
+  ) =>
+    withNames(pdf, (u) => {
+      const ef = u.add({
+        t: 'stream',
+        dict: dict({ Subtype: name('text/plain'), Filter: name('FlateDecode'), ...extra }),
+        data: raw,
+      });
+      const s = u.add(dict({ Type: name('Filespec'), F: latin1(n), EF: dict({ F: ef }) }));
+      return dict({ EmbeddedFiles: dict({ Names: [latin1(n), s] }) });
+    });
+
+  it('decodes a UTF-8 BOM key and refuses the same logical name', async () => {
+    const pdf = await appendRevision(await basePdf(), (f, u) => {
+      const s = spec(u, 'a.txt', 'x');
+      const cat = { t: 'dict' as const, entries: new Map(f.catalog.entries) };
+      cat.entries.set('Names', dict({ EmbeddedFiles: dict({ Names: [utf8Key('a.txt'), s] }) }));
+      u.set(f.rootRef, cat);
+    });
+    expect((await readAttachments(new PdfFile(pdf))).map((a) => a.name)).toEqual(['a.txt']);
+    expect(() => appendRevision(pdf, (f, u) => attachFile(f, u, file('a.txt')))).toThrow(/exists/);
+  });
+
+  it('reports a duplicate name inside one revision as changed', async () => {
+    const pdf = await withNames(await basePdf(), (u) => {
+      const orig = spec(u, 'a', 'orig');
+      const evil = spec(u, 'a', 'evil');
+      return dict({ EmbeddedFiles: dict({ Names: [latin1('a'), evil, latin1('a'), orig] }) });
+    });
+    expect(await attachmentChanges(pdf)).toEqual([{ name: 'a', kind: 'changed', revision: 1 }]);
+  });
+
+  it('rejects bad maxInflatedBytes with a RangeError', async () => {
+    const f = new PdfFile(await basePdf());
+    for (const bad of [Number.NaN, -1, 1.5, '5' as unknown as number, null as unknown as number])
+      await expect(readAttachments(f, undefined, { maxInflatedBytes: bad })).rejects.toThrow(
+        RangeError,
+      );
+    await expect(readAttachments(f, undefined, { maxInflatedBytes: Infinity })).resolves.toEqual(
+      [],
+    );
+    await expect(readAttachments(f, undefined, { maxInflatedBytes: 0 })).resolves.toEqual([]);
+  });
+
+  it('returns a corrupt or truncated stream raw with inflateError and still compares it', async () => {
+    const good = await deflate(text('hello hello hello hello'));
+    const cases = [good.slice(0, good.length - 6), Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8])];
+    for (const raw of cases) {
+      const pdf = await flateFile(await basePdf(), raw);
+      const found = await readAttachments(new PdfFile(pdf));
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ unsupportedFilter: true, filter: 'FlateDecode' });
+      expect(typeof found[0]!.inflateError).toBe('string');
+      expect(found[0]!.data).toEqual(raw);
+      expect(await attachmentChanges(pdf)).toEqual([]);
+    }
+  });
+
+  it('flags trailing junk after the deflate data', async () => {
+    const raw = Uint8Array.from([...(await deflate(text('abc'))), 9, 9, 9, 9]);
+    const found = await readAttachments(new PdfFile(await flateFile(await basePdf(), raw)));
+    expect(found).toHaveLength(1);
+    if (found[0]!.inflateError === undefined) expect(ascii(found[0]!.data)).toBe('abc');
+    else expect(found[0]!.data).toEqual(raw);
+  });
+
+  it('flags /FlateDecode with predictor /DecodeParms as unsupported (raw bytes)', async () => {
+    const raw = await deflate(text('some predicted data'));
+    for (const parms of [
+      dict({ Predictor: 12, Columns: 4 }),
+      dict({ Predictor: 2 }),
+      [dict({ Predictor: 12 })],
+    ]) {
+      const pdf = await flateFile(await basePdf(), raw, { DecodeParms: parms as PdfObject });
+      const [a] = await readAttachments(new PdfFile(pdf));
+      expect(a).toMatchObject({ unsupportedFilter: true, filter: 'FlateDecode' });
+      expect(a!.data).toEqual(raw);
+    }
+    const plain = await flateFile(await basePdf(), raw, { DecodeParms: dict({ Predictor: 1 }) });
+    expect(ascii((await readAttachments(new PdfFile(plain)))[0]!.data)).toBe('some predicted data');
+  });
+});

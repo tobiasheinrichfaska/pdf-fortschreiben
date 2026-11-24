@@ -45,8 +45,13 @@ function getDict(u: Update, o: PdfObject | undefined): PdfDict | undefined {
   return isStream(v) ? undefined : isDict(v as PdfObject) ? (v as PdfDict) : undefined;
 }
 
-/** A PDF text string as text: UTF-16BE with byte order mark, else PDFDocEncoding (taken as Latin-1). */
+/**
+ * A PDF text string as text: UTF-16BE with byte order mark, UTF-8 with byte order mark (PDF 2.0; the mark is
+ * dropped), else PDFDocEncoding (taken as Latin-1).
+ */
 function decodeText(bytes: Uint8Array): string {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
+    return new TextDecoder('utf-8').decode(bytes.subarray(3));
   if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
     if (bytes.length % 2 !== 0)
       throw new PdfReadError('syntax', 'name tree key: odd UTF-16 length');
@@ -203,8 +208,13 @@ export interface FoundAttachment {
    */
   readonly data: Readonly<Uint8Array>;
   readonly description?: string;
-  /** Set when the stream has a filter other than a single `/FlateDecode`: `data` is then not decoded. */
+  /**
+   * Set when `data` is not decoded: a filter other than a single `/FlateDecode`, a `/FlateDecode` with a
+   * predictor in `/DecodeParms`, or a stream that failed to inflate (then `inflateError` is set too).
+   */
   readonly unsupportedFilter?: boolean;
+  /** Set (with `unsupportedFilter`) when inflating failed (truncated, corrupt, trailing junk): the message. */
+  readonly inflateError?: string;
   /**
    * Set when inflating would exceed `maxInflatedBytes`: reading stopped early, `data` is the raw (still
    * compressed) stream bytes and `filter` is set. `attachmentChanges` still compares such a file.
@@ -218,7 +228,10 @@ export interface FoundAttachment {
 export const DEFAULT_MAX_INFLATED_BYTES = 256 * 1024 * 1024;
 
 export interface ReadAttachmentsOptions {
-  /** Largest inflated size of one attachment (default 256 MiB); a larger one is returned raw with `tooLarge`. */
+  /**
+   * Largest inflated size of one attachment (default 256 MiB); a larger one is returned raw with `tooLarge`.
+   * A finite integer >= 0 or `Infinity`; anything else throws a `RangeError`.
+   */
   readonly maxInflatedBytes?: number;
 }
 
@@ -302,6 +315,22 @@ function filterLabel(filter: PdfObject): string {
   return list.map((f) => nameOf(f) ?? '?').join(',');
 }
 
+/** True when `/DecodeParms` (or `/DP`) asks for a predictor (> 1) or is not understood: not plain Flate. */
+function hasPredictor(file: PdfFile, stream: PdfStream): boolean {
+  const raw = stream.dict.entries.get('DecodeParms') ?? stream.dict.entries.get('DP');
+  const parms = file.resolve(raw);
+  if (parms === undefined || (parms as unknown) === null) return false;
+  const list = Array.isArray(parms) ? parms : [parms];
+  for (const p of list) {
+    const d = file.resolve(p as PdfObject);
+    if ((d as unknown) === null || d === undefined) continue;
+    if (!isDict(d as PdfObject)) return true;
+    const pred = file.resolve((d as PdfDict).entries.get('Predictor'));
+    if (pred !== undefined && (pred as unknown) !== 1) return true;
+  }
+  return false;
+}
+
 /**
  * The embedded files of the newest revision (uncompressed or `/FlateDecode`), `/Kids` followed. A
  * `/FlateDecode` stream that inflates beyond `options.maxInflatedBytes` is not decoded: reading stops at the
@@ -312,7 +341,12 @@ export async function readAttachments(
   cache?: StreamCache,
   options: ReadAttachmentsOptions = {},
 ): Promise<FoundAttachment[]> {
-  const max = options.maxInflatedBytes ?? DEFAULT_MAX_INFLATED_BYTES;
+  const max: unknown =
+    options.maxInflatedBytes === undefined ? DEFAULT_MAX_INFLATED_BYTES : options.maxInflatedBytes;
+  if (typeof max !== 'number' || !(max === Infinity || (Number.isInteger(max) && max >= 0)))
+    throw new RangeError(
+      'readAttachments: maxInflatedBytes must be a finite integer >= 0 or Infinity',
+    );
   const names = file.dict(file.catalog.entries.get('Names'));
   const treeRef = names?.entries.get('EmbeddedFiles');
   const out: FoundAttachment[] = [];
@@ -329,12 +363,18 @@ export async function readAttachments(
     let tooLarge = false;
     let label: string | undefined;
     let unsupported = false;
+    let inflateError: string | undefined;
     if (filter !== undefined) {
       label = filterLabel(filter);
-      if (label === 'FlateDecode') {
-        const d = await decoded(stream.data, cache, max);
-        if (d === undefined) tooLarge = true;
-        else data = d;
+      if (label === 'FlateDecode' && !hasPredictor(file, stream)) {
+        try {
+          const d = await decoded(stream.data, cache, max);
+          if (d === undefined) tooLarge = true;
+          else data = d;
+        } catch (e) {
+          unsupported = true;
+          inflateError = e instanceof Error ? e.message || e.name : String(e);
+        }
       } else unsupported = true;
     }
     if (unsupported || tooLarge || filter === undefined) data = shared(stream.data, cache);
@@ -349,6 +389,7 @@ export async function readAttachments(
         : {}),
       ...(label === undefined ? {} : { filter: label }),
       ...(unsupported ? { unsupportedFilter: true } : {}),
+      ...(inflateError === undefined ? {} : { inflateError }),
       ...(tooLarge ? { tooLarge: true } : {}),
     });
   }
@@ -357,6 +398,10 @@ export async function readAttachments(
 
 export interface AttachmentChange {
   readonly name: string;
+  /**
+   * `changed` also covers a name that occurs more than once in one revision's name tree (a second entry
+   * could hide a change); it is reported for the first revision that has the duplicate.
+   */
   readonly kind: 'removed' | 'changed';
   /** The first revision (index) in which the file is missing or different. */
   readonly revision: number;
@@ -374,8 +419,13 @@ export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChan
   const cache: StreamCache = new Map();
   for (let i = 0; i < file.revisions.length; i++) {
     const now = new Map<string, string>();
-    for (const a of await readAttachments(new PdfFile(file.revisionBytes(i)), cache))
-      now.set(a.name, attachmentDigest(a));
+    for (const a of await readAttachments(new PdfFile(file.revisionBytes(i)), cache)) {
+      if (now.has(a.name) && !reported.has(a.name)) {
+        out.push({ name: a.name, kind: 'changed', revision: i });
+        reported.add(a.name);
+      }
+      if (!now.has(a.name)) now.set(a.name, attachmentDigest(a));
+    }
     for (const [n, digest] of seen) {
       if (reported.has(n)) continue;
       const d = now.get(n);
