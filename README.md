@@ -38,14 +38,19 @@ await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelös
 ## Grenzen
 
 - Schreibt nur an PDFs mit **klassischer Querverweistabelle** weiter (so legt pdf-lib sie mit
-  `useObjectStreams: false` an); Querverweis- und Objektströme sowie verschlüsselte Dateien (`/Encrypt`) werden mit einem Code abgelehnt
-  (`xref-stream`, `object-stream`, `encrypted`).
+  `useObjectStreams: false` an); Querverweis- und Objektströme, Hybriddateien (`/XRefStm`), verschlüsselte Dateien (`/Encrypt`) und
+  linearisierte Dateien werden mit einem Code abgelehnt (`xref-stream`, `object-stream`, `encrypted`, `linearized`).
+  Weitere `PdfReadError`-Codes: `syntax` (auch Müll vor `%PDF`), `no-startxref`, `xref-loop`, `object-missing`,
+  `object-mismatch`.
 - Die Bibliothek prüft **keine Tokens** (Signatur, Kette, Abdruck = Hash): das macht der übergebene Prüfer.
   Sie prüft nur, dass der Bereich die Datei bis zum Ende der Revision außer genau dem eigenen `/Contents`
   abdeckt (`rangeOk`). `rangeOk` ist **strukturell, kein Manipulationsnachweis**: der Aufrufer muss den
   Abdruck im Token gegen `t.digest` prüfen (im Beispiel oben `prüfeToken(t.token, t.digest)`).
 - `findDocTimeStamps` bricht bei einem fehlerhaften Stempel nicht ab: der Eintrag hat `error`, `rangeOk` und
   `tokenOk` sind `false`.
+- `appendDocTimeStamp`: `options.reserve` (Standard 16384 Bytes) ist der Platz für das Token; erlaubt 1024..65536, sonst `RangeError`; ein längeres Token ebenfalls `RangeError`.
+- `PdfFile.revisionBytes(i)` enthält das eine Zeilenende nach `%%EOF`; es ist ein Präfix der fortgeschriebenen Datei, nicht unbedingt byte-gleich mit der ursprünglichen Basis.
+- `attachmentChanges` meldet `kind` `'removed'` oder `'changed'` (auch bei doppelten Namen in einer Revision); `revision` ist die erste betroffene Revision; `maxInflatedBytes` hat den Standardwert.
 - Die Antwort des `Stamper` muss genau eine DER-SEQUENCE sein; BER mit unbestimmter Länge wird abgelehnt.
 - `readAttachments` entschlüsselt nur unkomprimierte oder einfach `FlateDecode`-Ströme; andere Filter kommen
   roh zurück (`unsupportedFilter`, `filter`). Ein `FlateDecode`-Strom, der über `maxInflatedBytes` (Standard 256 MiB, dritter Parameter) hinaus wächst, wird nicht entpackt: das Lesen bricht ab, der Eintrag kommt roh mit `tooLarge` zurück (Schutz vor Dekompressionsbomben). `attachFile` lehnt Namensbäume mit `/Kids` ab, das Lesen folgt ihnen.
