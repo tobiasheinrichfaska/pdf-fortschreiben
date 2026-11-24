@@ -71,6 +71,10 @@ npm test
 
 ## Known Limitations
 
+- **Linearized files are refused** (`PdfReadError.code` `linearized`): a first object that is a `/Linearized`
+  dictionary, or a `/Prev` chain whose revisions do not lie one after the other, cannot be continued by appending.
+- **Leading junk before `%PDF` is not supported:** offsets are taken relative to the file start, not the header;
+  such a file fails with a code (not continued).
 - **Not validated:** no PDF/A checker (veraPDF) run; the invisible widget has `/F 132` and an empty
   appearance stream, which PDF/A-3 should accept, unchecked.
 - The trailer's `/ID` is carried over unchanged (the second element „should“ change per update; optional).

@@ -343,3 +343,59 @@ describe('revision end', () => {
     expect(() => new PdfFile(cut)).toThrow(PdfReadError);
   });
 });
+
+describe('PdfFile hostile layouts', () => {
+  it('refuses a linearized file (revisions not monotonic)', () => {
+    const parts: string[] = ['%PDF-1.4\n'];
+    const at = (): number => parts.join('').length;
+    const offs: number[] = [];
+    offs[1] = at();
+    parts.push('1 0 obj\n<</Linearized 1 /L 0>>\nendobj\n');
+    offs[2] = at();
+    parts.push('2 0 obj\n<</Type/Catalog>>\nendobj\n');
+    const first = at();
+    const mainAt = 'x'.repeat(0);
+    void mainAt;
+    // Main section goes to the end; its offset is fixed below.
+    const pad = (n: number): string => String(n).padStart(10, '0');
+    const firstXref = (prev: number): string =>
+      `xref\n1 2\n${pad(offs[1]!)} 00000 n \n${pad(offs[2]!)} 00000 n \ntrailer\n<</Size 3/Root 2 0 R/Prev ${String(prev).padStart(6, '0')}>>\nstartxref\n0\n%%EOF\n`;
+    const body = firstXref(0);
+    const mainStart = first + body.length;
+    parts.push(firstXref(mainStart));
+    parts.push(
+      `xref\n0 1\n0000000000 65535 f \ntrailer\n<</Size 3/Root 2 0 R>>\nstartxref\n${first}\n%%EOF\n`,
+    );
+    const bytes = latin1Bytes(parts.join(''));
+    try {
+      new PdfFile(bytes);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(PdfReadError);
+      expect((e as PdfReadError).code).toBe('linearized');
+    }
+  });
+
+  it.each([
+    ['self', '<</Length 7 0 R>>', '<</Length 7 0 R>>'],
+    ['A-B-A', '<</Length 8 0 R>>', '<</Length 7 0 R>>'],
+  ])('refuses a cyclic stream /Length (%s)', (_n, d7, d8) => {
+    const parts: string[] = ['%PDF-1.4\n'];
+    const offs: number[] = [];
+    const add = (n: number, body: string): void => {
+      offs[n] = parts.join('').length;
+      parts.push(`${n} 0 obj\n${body}\nendobj\n`);
+    };
+    add(1, '<</Type/Catalog>>');
+    add(7, `${d7}\nstream\nabc\nendstream`);
+    add(8, `${d8}\nstream\nabc\nendstream`);
+    const x = parts.join('').length;
+    const pad = (n: number): string => String(n).padStart(10, '0');
+    parts.push(
+      `xref\n0 1\n0000000000 65535 f \n1 1\n${pad(offs[1]!)} 00000 n \n7 2\n${pad(offs[7]!)} 00000 n \n${pad(offs[8]!)} 00000 n \ntrailer\n<</Size 9/Root 1 0 R>>\nstartxref\n${x}\n%%EOF\n`,
+    );
+    const file = new PdfFile(latin1Bytes(parts.join('')));
+    expect(() => file.object(ref(7))).toThrow(PdfReadError);
+    expect(() => file.object(ref(7))).not.toThrow(RangeError);
+  });
+});

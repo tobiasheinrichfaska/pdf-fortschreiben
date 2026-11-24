@@ -14,7 +14,8 @@ export type ReadFailure =
   | 'xref-loop'
   | 'object-missing'
   | 'object-mismatch'
-  | 'encrypted';
+  | 'encrypted'
+  | 'linearized';
 
 export class PdfReadError extends Error {
   readonly code: ReadFailure;

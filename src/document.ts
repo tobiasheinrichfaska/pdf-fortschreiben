@@ -17,6 +17,7 @@ import {
 import {
   PdfReadError,
   isStream,
+  latin1Text,
   lastStartxref,
   readIndirect,
   readRevisionEnd,
@@ -35,6 +36,14 @@ export interface Revision {
   readonly trailer: PdfDict;
 }
 
+/** True when the first indirect object after the header is a `/Linearized` dictionary. */
+function hasLinearizedDict(bytes: Uint8Array): boolean {
+  const head = latin1Text(bytes, 0, Math.min(bytes.length, 1024));
+  return /^%PDF-[^\r\n]*(?:[\r\n]+%[^\r\n]*)*[\r\n\s]*\d+\s+\d+\s+obj\s*<<(?:(?!endobj)[^])*?\/Linearized\b/.test(
+    head,
+  );
+}
+
 export class PdfFile {
   readonly bytes: Uint8Array;
   /** Revisions, oldest first. */
@@ -42,6 +51,7 @@ export class PdfFile {
   private readonly table = new Map<number, { offset: number; gen: number }>();
   private readonly freed = new Map<number, number>();
   private readonly cache = new Map<number, PdfObject | PdfStream>();
+  private readonly reading = new Set<number>();
 
   constructor(bytes: Uint8Array) {
     this.bytes = bytes;
@@ -70,6 +80,18 @@ export class PdfFile {
       end: readRevisionEnd(bytes, s.trailerEnd),
       trailer: s.trailer,
     }));
+    // Revisions must be appended one after the other; a linearized file is not (first-page section at the start).
+    if (hasLinearizedDict(bytes))
+      throw new PdfReadError('linearized', 'the first object is a /Linearized dictionary');
+    for (let i = 1; i < this.revisions.length; i++)
+      if (
+        this.revisions[i]!.end <= this.revisions[i - 1]!.end ||
+        this.revisions[i]!.xrefAt <= this.revisions[i - 1]!.xrefAt
+      )
+        throw new PdfReadError(
+          'linearized',
+          `revision ${i} (xref ${this.revisions[i]!.xrefAt}) does not lie after revision ${i - 1}`,
+        );
     for (const s of sections)
       for (const [num, e] of s.entries) {
         if (e.inUse) {
@@ -115,17 +137,25 @@ export class PdfFile {
       );
     const hit = this.cache.get(r.num);
     if (hit !== undefined) return hit;
-    const o = readIndirect(
-      this.bytes,
-      e.offset,
-      r.num,
-      (len) => {
-        const v = isRef(len) ? this.object(len) : len;
-        if (typeof v !== 'number') throw new PdfReadError('syntax', `stream length of ${r.num}`);
-        return v;
-      },
-      e.gen,
-    );
+    if (this.reading.has(r.num))
+      throw new PdfReadError('syntax', `object ${r.num} refers to itself (stream /Length cycle)`);
+    this.reading.add(r.num);
+    let o: PdfObject | PdfStream;
+    try {
+      o = readIndirect(
+        this.bytes,
+        e.offset,
+        r.num,
+        (len) => {
+          const v = isRef(len) ? this.object(len) : len;
+          if (typeof v !== 'number') throw new PdfReadError('syntax', `stream length of ${r.num}`);
+          return v;
+        },
+        e.gen,
+      );
+    } finally {
+      this.reading.delete(r.num);
+    }
     this.cache.set(r.num, o);
     return o;
   }
