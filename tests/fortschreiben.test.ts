@@ -145,7 +145,7 @@ describe('document time stamps', () => {
     ]);
     found.forEach((t, i) => {
       expect(t.digest).toEqual(seen[i]);
-      expect(t.token).toEqual(Uint8Array.from([0x04, 32, ...seen[i]!]));
+      expect(t.token).toEqual(Uint8Array.from([0x30, 32, ...seen[i]!]));
       expect(t.byteRange[2]! + t.byteRange[3]!).toBe(
         new PdfFile(s2).revisions[t.revision!]!.end + 1,
       );
@@ -167,14 +167,14 @@ describe('document time stamps', () => {
     await expect(
       appendDocTimeStamp(
         base,
-        async () => Uint8Array.from([0x04, 0x82, 0x08, 0x00, ...new Uint8Array(2048)]),
+        async () => Uint8Array.from([0x30, 0x82, 0x08, 0x00, ...new Uint8Array(2048)]),
         {
           reserve: 2048,
         },
       ),
     ).rejects.toThrow(RangeError);
     await expect(
-      appendDocTimeStamp(base, async () => Uint8Array.from([0x04, 0x05, 1]), { reserve: 2048 }),
+      appendDocTimeStamp(base, async () => Uint8Array.from([0x30, 0x05, 1]), { reserve: 2048 }),
     ).rejects.toThrow('DER');
   });
 });

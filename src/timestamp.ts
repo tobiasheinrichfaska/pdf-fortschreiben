@@ -15,7 +15,6 @@ import {
   textString,
   type PdfDict,
   type PdfObject,
-  type PdfRef,
 } from './objects.ts';
 import { PdfReadError, latin1Text } from './parse.ts';
 import { sha256Bytes } from './sha256.ts';
@@ -137,7 +136,8 @@ export async function appendDocTimeStamp(
 
   const token = await stamp(rangeDigest(bytes, range));
   const len = derLength(token);
-  if (len === null || len !== token.length) throw new Error('stamp: answer is not one DER element');
+  if (token[0] !== 0x30 || len === null || len !== token.length)
+    throw new Error('stamp: answer is not one DER SEQUENCE');
   if (token.length > reserve) throw new RangeError(`token (${token.length} B) exceeds reserve`);
   const HEX = '0123456789ABCDEF';
   for (let i = 0; i < token.length; i++) {
@@ -148,46 +148,123 @@ export async function appendDocTimeStamp(
 }
 
 export interface FoundTimeStamp {
-  /** Field name. */
+  /** Field name (partial names of `/Kids` parents joined by a dot). */
   readonly field: string;
-  /** Object number of the `/DocTimeStamp` dictionary. */
+  /** Object number of the `/DocTimeStamp` dictionary; 0 if `/V` is a direct dictionary. */
   readonly object: number;
+  /** Empty if the dictionary is malformed (see `error`). */
   readonly byteRange: readonly number[];
   /** Index of the revision whose end the range reaches; null if it ends elsewhere (suspicious). */
   readonly revision: number | null;
-  /** True if the range covers the whole file up to that revision's end except exactly the token string. */
+  /**
+   * True if the range covers the whole file up to that revision's end except exactly this stamp's own
+   * `/Contents` string (same place, same hex).
+   */
   readonly rangeOk: boolean;
   readonly digest: Uint8Array;
-  /** The token (padding removed). */
+  /** The token (padding removed); empty if `tokenOk` is false. */
   readonly token: Uint8Array;
+  /** True if `/Contents` starts with one complete DER SEQUENCE followed only by zero padding. */
+  readonly tokenOk: boolean;
+  /** Set if this stamp dictionary could not be read (then `rangeOk` and `tokenOk` are false). */
+  readonly error?: string;
 }
 
 /**
  * Every document time stamp the file ever had: the signature fields of every revision's catalog (a field
- * removed later is still found). Checks the ranges and computes the digests; checking each token
- * (signature, chain, imprint = digest) is up to the caller's verifier.
+ * removed later is still found; `/Kids` are followed). Checks the ranges and computes the digests;
+ * checking each token (signature, chain, imprint = digest) is up to the caller's verifier. A malformed
+ * stamp dictionary yields an entry with `rangeOk: false` and an `error`, it does not abort the listing.
  */
 export function findDocTimeStamps(pdf: Uint8Array): FoundTimeStamp[] {
   const file = new PdfFile(pdf);
-  const found = new Map<number, FoundTimeStamp>();
+  const found = new Map<string, FoundTimeStamp>();
   for (let i = 0; i < file.revisions.length; i++) {
-    const view = new PdfFile(file.revisionBytes(i));
-    const form = view.dict(view.catalog.entries.get('AcroForm'));
-    const fields = view.resolve(form?.entries.get('Fields'));
-    if (!Array.isArray(fields)) continue;
-    for (const f of fields) {
-      const field = view.dict(f);
-      const vRef = field?.entries.get('V');
-      if (field === undefined || !isRef(vRef) || found.has(vRef.num)) continue;
-      const v = view.dict(vRef);
-      if (v === undefined || !isName(v.entries.get('SubFilter'), 'ETSI.RFC3161')) continue;
-      found.set(vRef.num, describe(file, vRef, v, field));
+    let view: PdfFile;
+    let fields: PdfObject | undefined;
+    try {
+      view = new PdfFile(file.revisionBytes(i));
+      const form = view.dict(view.catalog.entries.get('AcroForm'));
+      fields = view.resolve(form?.entries.get('Fields')) as PdfObject | undefined;
+    } catch {
+      continue;
     }
+    if (!Array.isArray(fields)) continue;
+    const seen = new Set<number>();
+    const walk = (f: PdfObject, prefix: string, depth: number): void => {
+      if (depth > 32) return;
+      if (isRef(f)) {
+        if (seen.has(f.num)) return;
+        seen.add(f.num);
+      }
+      try {
+        const field = view.dict(f);
+        if (field === undefined) return;
+        const t = field.entries.get('T');
+        const own = isTextObject(t) ? decodeText(t.bytes) : '';
+        const fieldName = prefix === '' ? own : own === '' ? prefix : `${prefix}.${own}`;
+        const kids = view.resolve(field.entries.get('Kids'));
+        if (Array.isArray(kids)) for (const k of kids) walk(k, fieldName, depth + 1);
+        const vObj = field.entries.get('V');
+        const v = view.dict(vObj);
+        if (v === undefined || !isName(v.entries.get('SubFilter'), 'ETSI.RFC3161')) return;
+        const num = isRef(vObj) ? vObj.num : 0;
+        let entry: FoundTimeStamp;
+        try {
+          entry = describe(file, num, v, fieldName);
+        } catch (e) {
+          entry = broken(num, fieldName, e);
+        }
+        // Same object number can be reused by a later revision: the byte range tells them apart.
+        const key = `${num}:${entry.error === undefined ? entry.byteRange.join(' ') : 'bad ' + entry.error}`;
+        if (!found.has(key)) found.set(key, entry);
+      } catch (e) {
+        const key = `field:${isRef(f) ? f.num : 0}:${String(e)}`;
+        if (!found.has(key)) found.set(key, broken(0, prefix, e));
+      }
+    };
+    for (const f of fields) walk(f, '', 0);
   }
-  return [...found.values()].sort((a, b) => (a.byteRange[2] ?? 0) - (b.byteRange[2] ?? 0));
+  const at = (x: FoundTimeStamp): number => x.byteRange[2] ?? Number.MAX_SAFE_INTEGER;
+  return [...found.values()].sort((a, b) => at(a) - at(b));
 }
 
-function describe(file: PdfFile, vRef: PdfRef, v: PdfDict, field: PdfDict): FoundTimeStamp {
+function broken(num: number, field: string, e: unknown): FoundTimeStamp {
+  return {
+    field,
+    object: num,
+    byteRange: [],
+    revision: null,
+    rangeOk: false,
+    digest: new Uint8Array(0),
+    token: new Uint8Array(0),
+    tokenOk: false,
+    error: e instanceof Error ? e.message : String(e),
+  };
+}
+
+const isTextObject = (t: unknown): t is { t: 'hex' | 'str'; bytes: Uint8Array } =>
+  typeof t === 'object' &&
+  t !== null &&
+  !Array.isArray(t) &&
+  ((t as { t?: string }).t === 'hex' || (t as { t?: string }).t === 'str');
+
+/** True if the bytes in `[b, c)` are the hex string `contents`, inside the body of object `num`. */
+function isOwnContents(bytes: Uint8Array, num: number, b: number, c: number, contents: Uint8Array) {
+  const gap = latin1Text(bytes, b, c);
+  const m = /^<([0-9A-Fa-f]*)>$/.exec(gap);
+  if (m === null || m[1]!.length !== contents.length * 2) return false;
+  for (let i = 0; i < contents.length; i++)
+    if (parseInt(m[1]!.slice(i * 2, i * 2 + 2), 16) !== contents[i]) return false;
+  if (num === 0) return true; // direct dictionary: no object body to locate
+  const from = Math.max(0, b - 4096);
+  const before = latin1Text(bytes, from, b);
+  let last: RegExpExecArray | null = null;
+  for (const h of before.matchAll(/(\d+)\s+(\d+)\s+obj\b/g)) last = h;
+  return last !== null && Number(last[1]) === num && !before.slice(last.index).includes('endobj');
+}
+
+function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundTimeStamp {
   const br = v.entries.get('ByteRange');
   const contents = v.entries.get('Contents');
   if (
@@ -199,7 +276,7 @@ function describe(file: PdfFile, vRef: PdfRef, v: PdfDict, field: PdfDict): Foun
     Array.isArray(contents) ||
     contents.t !== 'hex'
   )
-    throw new PdfReadError('syntax', `time stamp ${vRef.num}`);
+    throw new PdfReadError('syntax', `time stamp ${num}: /ByteRange or /Contents malformed`);
   const range = br as number[];
   const [a, b, c, d] = range as [number, number, number, number];
   const bytes = file.bytes;
@@ -208,29 +285,27 @@ function describe(file: PdfFile, vRef: PdfRef, v: PdfDict, field: PdfDict): Foun
   const revision = file.revisions.findIndex(
     (r) => endAt >= r.end && endAt <= r.end + 2 && /^\r?\n?$/.test(latin1Text(bytes, r.end, endAt)),
   );
-  const gap = latin1Text(bytes, b, c);
   const rangeOk =
     a === 0 &&
     c > b &&
     endAt <= bytes.length &&
     revision >= 0 &&
-    /^<[0-9A-Fa-f]*>$/.test(gap) &&
-    (gap.length - 2) / 2 === contents.bytes.length;
+    isOwnContents(bytes, num, b, c, contents.bytes);
   const len = derLength(contents.bytes);
-  const token = contents.bytes.subarray(0, len ?? 0);
-  const t = field.entries.get('T');
-  const fieldName =
-    typeof t === 'object' && t !== null && !Array.isArray(t) && (t.t === 'hex' || t.t === 'str')
-      ? decodeText(t.bytes)
-      : '';
+  const tokenOk =
+    contents.bytes[0] === 0x30 &&
+    len !== null &&
+    len <= contents.bytes.length &&
+    contents.bytes.subarray(len).every((x) => x === 0);
   return {
-    field: fieldName,
-    object: vRef.num,
+    field,
+    object: num,
     byteRange: range,
     revision: revision >= 0 ? revision : null,
     rangeOk,
     digest: endAt <= bytes.length ? rangeDigest(bytes, range) : new Uint8Array(0),
-    token,
+    token: tokenOk ? contents.bytes.subarray(0, len!) : new Uint8Array(0),
+    tokenOk,
   };
 }
 

@@ -53,6 +53,9 @@ export class PdfFile {
       at = typeof prev === 'number' ? prev : null;
     }
     sections.reverse();
+    for (const s of sections)
+      if (s.trailer.entries.has('Encrypt'))
+        throw new PdfReadError('encrypted', 'the trailer has /Encrypt');
     this.revisions = sections.map((s) => ({
       xrefAt: s.at,
       end: revisionEnd(bytes, s.at),
@@ -76,6 +79,11 @@ export class PdfFile {
     let max = typeof s === 'number' ? s : 0;
     for (const num of this.table.keys()) max = Math.max(max, num + 1);
     return max;
+  }
+
+  /** The generation of an object in use, or `undefined` when the file has no such object. */
+  generation(num: number): number | undefined {
+    return this.table.get(num)?.gen;
   }
 
   /** The object a reference points to (in the newest revision). */
@@ -148,6 +156,8 @@ export class Update {
   private readonly file: PdfFile;
   private next: number;
   readonly objects = new Map<number, PdfObject | PdfStream>();
+  /** Generation written for each object (that of the file's xref entry; 0 for new objects). */
+  readonly generations = new Map<number, number>();
 
   constructor(file: PdfFile) {
     this.file = file;
@@ -158,24 +168,31 @@ export class Update {
   add(o: PdfObject | PdfStream): PdfRef {
     const r = ref(this.next++);
     this.objects.set(r.num, o);
+    this.generations.set(r.num, 0);
     return r;
   }
 
   /** Replaces an existing object in the new revision. */
   set(r: PdfRef, o: PdfObject | PdfStream): void {
-    if (r.gen !== 0) throw new Error('only generation 0 is written');
+    const gen = this.file.generation(r.num) ?? 0;
+    if (r.gen !== gen)
+      throw new Error(`object ${r.num}: generation ${r.gen} given, the file has ${gen}`);
     this.objects.set(r.num, o);
+    this.generations.set(r.num, gen);
+    if (r.num >= this.next) this.next = r.num + 1;
   }
 
   /** The object as this update sees it: changed here, or else from the file. */
   get(r: PdfRef): PdfObject | PdfStream {
-    return this.objects.get(r.num) ?? this.file.object(r);
+    return this.objects.has(r.num) ? this.objects.get(r.num)! : this.file.object(r);
   }
 
   get size(): number {
     return this.next;
   }
 }
+
+const RESERVED_TRAILER = ['Size', 'Prev', 'Root', 'ID', 'Encrypt'];
 
 export interface Written {
   readonly bytes: Uint8Array;
@@ -184,14 +201,18 @@ export interface Written {
 }
 
 /**
- * Appends the update as a new revision. `trailerExtra` may set `/Info`; `/Root`, `/ID` are carried over,
- * `/Size` and `/Prev` are set here.
+ * Appends the update as a new revision. `trailerExtra` may set `/Info` and other keys; `/Root`, `/ID` are
+ * carried over, `/Size` and `/Prev` are set here, and `/Size`, `/Prev`, `/Root`, `/ID`, `/Encrypt` in
+ * `trailerExtra` are refused with an Error. An update without objects is refused.
  */
 export function writeUpdate(
   file: PdfFile,
   update: Update,
   trailerExtra: Record<string, PdfObject> = {},
 ): Written {
+  if (update.objects.size === 0) throw new Error('writeUpdate: the update has no objects');
+  for (const key of RESERVED_TRAILER)
+    if (key in trailerExtra) throw new Error(`writeUpdate: trailerExtra must not set /${key}`);
   const base = file.bytes;
   const sink = new TextSink();
   const offsets = new Map<number, number>();
@@ -202,7 +223,7 @@ export function writeUpdate(
   for (const num of nums) {
     const o = update.objects.get(num)!;
     offsets.set(num, base.length + sink.size);
-    sink.push(`${num} 0 obj\n`);
+    sink.push(`${num} ${update.generations.get(num) ?? 0} obj\n`);
     if (isStream(o)) {
       const d = { t: 'dict' as const, entries: new Map(o.dict.entries) };
       d.entries.set('Length', o.data.length);
@@ -225,12 +246,14 @@ export function writeUpdate(
     while (j + 1 < nums.length && nums[j + 1] === nums[j]! + 1) j++;
     sink.push(`${nums[i]} ${j - i + 1}\n`);
     for (let k = i; k <= j; k++)
-      sink.push(`${String(offsets.get(nums[k]!)).padStart(10, '0')} 00000 n\r\n`);
+      sink.push(
+        `${String(offsets.get(nums[k]!)).padStart(10, '0')} ${String(update.generations.get(nums[k]!) ?? 0).padStart(5, '0')} n\r\n`,
+      );
     i = j + 1;
   }
   const prevAt = file.revisions[file.revisions.length - 1]!.xrefAt;
   const trailer = new Map<string, PdfObject>();
-  trailer.set('Size', update.size);
+  trailer.set('Size', Math.max(update.size, (nums[nums.length - 1] ?? 0) + 1));
   trailer.set('Root', file.rootRef);
   const info = trailerExtra['Info'] ?? file.trailer.entries.get('Info');
   if (info !== undefined) trailer.set('Info', info);

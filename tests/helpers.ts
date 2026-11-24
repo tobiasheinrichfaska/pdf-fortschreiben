@@ -14,12 +14,12 @@ export async function basePdf(pages = 1, objectStreams = false): Promise<Uint8Ar
   return doc.save({ useObjectStreams: objectStreams });
 }
 
-/** A stand-in "token": one DER OCTET STRING holding the digest (checks the plumbing, proves nothing). */
+/** A stand-in "token": one DER SEQUENCE holding the digest (checks the plumbing, proves nothing). */
 export const fakeStamper =
   (seen: Uint8Array[] = []) =>
   async (digest: Uint8Array): Promise<Uint8Array> => {
     seen.push(digest);
-    return Uint8Array.from([0x04, digest.length, ...digest]);
+    return Uint8Array.from([0x30, digest.length, ...digest]);
   };
 
 export const text = (s: string): Uint8Array => new TextEncoder().encode(s);

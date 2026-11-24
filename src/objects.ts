@@ -105,9 +105,13 @@ function nameText(v: string): string {
 
 function numberText(n: number): string {
   if (!Number.isFinite(n)) throw new Error('number: not finite');
-  if (Number.isInteger(n)) return String(n);
+  if (Number.isInteger(n)) {
+    if (!Number.isSafeInteger(n)) throw new Error('number: integer beyond the safe range');
+    return Object.is(n, -0) ? '0' : String(n);
+  }
+  // Fractions are below 2^53 here, so toFixed never switches to exponent notation.
   const s = n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
-  return s === '-0' ? '0' : s;
+  return s === '-0' || s === '' ? '0' : s;
 }
 
 function literalText(bytes: Uint8Array): string {
