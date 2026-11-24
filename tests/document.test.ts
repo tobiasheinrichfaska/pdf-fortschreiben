@@ -119,3 +119,50 @@ describe('numbers', () => {
     expect(num(Number.MAX_SAFE_INTEGER)).toBe('9007199254740991');
   });
 });
+
+describe('writer refusals and freed objects', () => {
+  it('refuses a stream nested in an array or dict, and unknown objects', () => {
+    const st = { t: 'stream' as const, dict: dict({}), data: new Uint8Array(0) };
+    expect(() => new TextSink().write([st] as never)).toThrow();
+    expect(() => new TextSink().write(dict({ A: st as never }))).toThrow();
+    expect(() => new TextSink().write({ t: 'bogus' } as never)).toThrow();
+  });
+  it('refuses raw text above 0xFF', () => {
+    expect(() => new TextSink().write({ t: 'raw', text: 'aĀ' })).toThrow();
+    const s = new TextSink();
+    s.push('Ā');
+    expect(() => s.bytes()).toThrow();
+  });
+  it('does not let the exposed maps bypass the generation check', async () => {
+    const file = new PdfFile(await base());
+    const u = new Update(file);
+    (u.objects as Map<number, never>).set(1, dict({}) as never);
+    (u.generations as Map<number, number>).set(1, 9);
+    expect(u.objects.size).toBe(0);
+    expect(() => writeUpdate(file, u)).toThrow();
+  });
+  it('reuses a freed object number with its freed generation', async () => {
+    const pdf = await base();
+    const file0 = new PdfFile(pdf);
+    const u0 = new Update(file0);
+    const r = u0.add(dict({ A: 1 }));
+    const w0 = writeUpdate(file0, u0).bytes;
+    const file1 = new PdfFile(w0);
+    // Free the object by hand: a revision with an 'f' entry of generation 1.
+    const s = written(w0);
+    const xrefAt = s.length;
+    const freeRev =
+      s +
+      `xref\n${r.num} 1\n0000000000 00001 f\r\ntrailer\n<</Size ${file1.size} /Root ${file1.rootRef.num} 0 R /Prev ${file1.revisions[file1.revisions.length - 1]!.xrefAt}>>\nstartxref\n${xrefAt}\n%%EOF\n`;
+    const file2 = new PdfFile(latin1Bytes(freeRev));
+    expect(file2.generation(r.num)).toBe(1);
+    expect(file2.generation(0)).toBeUndefined();
+    const u = new Update(file2);
+    expect(() => u.set(ref(r.num, 0), dict({ B: 2 }))).toThrow();
+    u.set(ref(r.num, 1), dict({ B: 2 }));
+    const out = written(writeUpdate(file2, u).bytes);
+    expect(out).toContain(`${r.num} 1 obj`);
+    expect(out).toMatch(/\d{10} 00001 n/);
+    expect(() => u.set(ref(0, 0), dict({}))).toThrow();
+  });
+});

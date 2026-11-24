@@ -37,6 +37,7 @@ export class PdfFile {
   /** Revisions, oldest first. */
   readonly revisions: readonly Revision[];
   private readonly table = new Map<number, { offset: number; gen: number }>();
+  private readonly freed = new Map<number, number>();
   private readonly cache = new Map<number, PdfObject | PdfStream>();
 
   constructor(bytes: Uint8Array) {
@@ -63,8 +64,14 @@ export class PdfFile {
     }));
     for (const s of sections)
       for (const [num, e] of s.entries) {
-        if (e.inUse) this.table.set(num, { offset: e.offset, gen: e.gen });
-        else this.table.delete(num);
+        if (e.inUse) {
+          this.table.set(num, { offset: e.offset, gen: e.gen });
+          this.freed.delete(num);
+        } else {
+          this.table.delete(num);
+          // The generation of a free entry is the one a reuse of the number must carry.
+          if (num !== 0) this.freed.set(num, e.gen);
+        }
       }
   }
 
@@ -81,9 +88,12 @@ export class PdfFile {
     return max;
   }
 
-  /** The generation of an object in use, or `undefined` when the file has no such object. */
+  /**
+   * The generation of an object in use, or of a freed one (the generation a reuse must carry), or
+   * `undefined` when the file has no such object. Object 0 is never reported.
+   */
   generation(num: number): number | undefined {
-    return this.table.get(num)?.gen;
+    return this.table.get(num)?.gen ?? this.freed.get(num);
   }
 
   /** The object a reference points to (in the newest revision). */
@@ -155,9 +165,18 @@ function revisionEnd(bytes: Uint8Array, xrefAt: number): number {
 export class Update {
   private readonly file: PdfFile;
   private next: number;
-  readonly objects = new Map<number, PdfObject | PdfStream>();
+  private readonly objs = new Map<number, PdfObject | PdfStream>();
+  private readonly gens = new Map<number, number>();
+
+  /** The objects of this update (a read only copy). */
+  get objects(): ReadonlyMap<number, PdfObject | PdfStream> {
+    return new Map(this.objs);
+  }
+
   /** Generation written for each object (that of the file's xref entry; 0 for new objects). */
-  readonly generations = new Map<number, number>();
+  get generations(): ReadonlyMap<number, number> {
+    return new Map(this.gens);
+  }
 
   constructor(file: PdfFile) {
     this.file = file;
@@ -167,24 +186,25 @@ export class Update {
   /** Adds a new object and returns its reference. */
   add(o: PdfObject | PdfStream): PdfRef {
     const r = ref(this.next++);
-    this.objects.set(r.num, o);
-    this.generations.set(r.num, 0);
+    this.objs.set(r.num, o);
+    this.gens.set(r.num, 0);
     return r;
   }
 
   /** Replaces an existing object in the new revision. */
   set(r: PdfRef, o: PdfObject | PdfStream): void {
     const gen = this.file.generation(r.num) ?? 0;
+    if (r.num === 0) throw new Error('object 0 cannot be set');
     if (r.gen !== gen)
       throw new Error(`object ${r.num}: generation ${r.gen} given, the file has ${gen}`);
-    this.objects.set(r.num, o);
-    this.generations.set(r.num, gen);
+    this.objs.set(r.num, o);
+    this.gens.set(r.num, gen);
     if (r.num >= this.next) this.next = r.num + 1;
   }
 
   /** The object as this update sees it: changed here, or else from the file. */
   get(r: PdfRef): PdfObject | PdfStream {
-    return this.objects.has(r.num) ? this.objects.get(r.num)! : this.file.object(r);
+    return this.objs.has(r.num) ? this.objs.get(r.num)! : this.file.object(r);
   }
 
   get size(): number {

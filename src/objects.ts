@@ -167,6 +167,8 @@ export class TextSink {
       });
       return this.push(']');
     }
+    if ((o as { t: string }).t === 'stream')
+      throw new Error('write: a stream is only valid as a top-level indirect object');
     switch (o.t) {
       case 'name':
         return this.push(nameText(o.v));
@@ -177,6 +179,9 @@ export class TextSink {
       case 'ref':
         return this.push(`${o.num} ${o.gen} R`);
       case 'raw':
+        for (let i = 0; i < o.text.length; i++)
+          if (o.text.charCodeAt(i) > 0xff)
+            throw new Error(`raw: character outside Latin-1 at ${i}`);
         if (o.id !== undefined) this.marks.set(o.id, this.length);
         return this.push(o.text);
       case 'dict': {
@@ -188,6 +193,8 @@ export class TextSink {
         }
         return this.push('>>');
       }
+      default:
+        throw new Error('write: unknown object');
     }
   }
 
@@ -195,7 +202,11 @@ export class TextSink {
   bytes(): Uint8Array {
     const text = this.parts.join('');
     const out = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i);
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c > 0xff) throw new Error(`bytes: character outside Latin-1 at ${i}`);
+      out[i] = c;
+    }
     return out;
   }
 }
