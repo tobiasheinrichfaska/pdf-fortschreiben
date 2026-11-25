@@ -81,7 +81,7 @@ npm test
   appearance stream, which PDF/A-3 should accept, unchecked.
 - `appendDocTimeStamp` reserves `options.reserve` bytes for the token (default 16384, allowed 1024..65536 else `RangeError`); a longer token is a `RangeError`.
 - `PdfFile.revisionBytes(i)` includes the single line end after `%%EOF`; it is a prefix of the updated file, not necessarily byte-equal to the original base.
-- The trailer's `/ID` is carried over unchanged (the second element „should“ change per update; optional).
+- **Trailer `/ID`:** every revision writes `/ID [<A> <B>]` as hex strings. B = first 16 bytes of SHA-256 over the old file plus the new revision's objects (trailer excluded), so deterministic (no clock, no randomness). A is kept from the old `/ID`; a file without `/ID` gets A = B. A malformed `/ID` (not an array of two strings) is `PdfReadError('syntax')`.
 - **External check (2026-11-24, `npm run extern` + `scripts/pyhanko-pruefen.py`, test PKI, no real service):**
   both document time stamps of a two-day file pass `openssl ts -verify` and pyHanko 0.38.2
   (`INTACT:TRUSTED`); pikepdf opens the file with no syntax findings. `pdfsig` (poppler 24.02) lists the
@@ -101,7 +101,6 @@ npm test
   being read as null (the spec's rule for readers): the library only appends and must not skip silently.
 - `FoundTimeStamp.digest` is computed lazily over the caller's buffer; it must not change after
   `findDocTimeStamps`.
-- The trailer `/ID` is carried over, never added; PDF/A-3 needs it, so the caller's base file must have one.
 - `/Size` is capped at 2147483647 (what `PdfFile` accepts): `Update.add`/`set`/`writeUpdate` refuse more.
 - `attachmentChanges` digest covers data, MIME, relationship, description, filter, Filespec `/Type` `/F` `/UF`, a separate
   `/EF /UF` stream, `/Params` Size/ModDate, stream `/Type` and membership in the catalog `/AF`. Files only in `/AF`

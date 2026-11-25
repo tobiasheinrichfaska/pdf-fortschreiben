@@ -591,3 +591,61 @@ describe('revision directly after an EOL-less %%EOF', () => {
     expect(code).toBe('object-mismatch');
   });
 });
+
+describe('trailer /ID', () => {
+  const ids = (bytes: Uint8Array): string[] =>
+    [...lastTrailer(bytes).matchAll(/\/ID\s*\[<([0-9a-fA-F]*)>\s*<([0-9a-fA-F]*)>\]/g)].flatMap(
+      (m) => [m[1]!, m[2]!],
+    );
+  const add = (pdf: Uint8Array, n = 1): Uint8Array =>
+    appendRevision(pdf, (_f, u) => {
+      u.add(dict({ N: n }));
+    });
+
+  it('creates one for a base without /ID: two 16 byte hex strings', async () => {
+    const pdf = await base();
+    expect(written(pdf)).not.toContain('/ID');
+    const [a, b] = ids(add(pdf));
+    expect(a).toMatch(/^[0-9a-fA-F]{32}$/);
+    expect(b).toMatch(/^[0-9a-fA-F]{32}$/);
+    expect(a).toBe(b);
+  });
+
+  it('keeps the first element and changes the second on a later revision', async () => {
+    const r1 = add(await base());
+    const r2 = add(r1, 2);
+    const [a1, b1] = ids(r1);
+    const [a2, b2] = ids(r2);
+    expect(a2).toBe(a1);
+    expect(b2).not.toBe(b1);
+    expect(b2).toMatch(/^[0-9a-fA-F]{32}$/);
+  });
+
+  it('is deterministic', async () => {
+    const pdf = await base();
+    expect(add(pdf)).toEqual(add(pdf));
+  });
+
+  it('throws on a malformed /ID', async () => {
+    const r1 = add(await base());
+    for (const bad of ['/ID [<00>]', '/ID 5', '/ID [<00> 7]']) {
+      const s = written(r1);
+      const at = s.lastIndexOf('/ID');
+      const end = s.indexOf(']', at) + 1;
+      const pdf = latin1Bytes(s.slice(0, at) + bad + s.slice(end));
+      expect(() => add(pdf)).toThrow(PdfReadError);
+    }
+  });
+
+  it('keeps the first element of an /ID set with pdf-lib', async () => {
+    const { PDFDocument, PDFHexString } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    doc.addPage([100, 100]);
+    const first = '0123456789abcdef0123456789abcdef';
+    doc.context.trailerInfo.ID = doc.context.obj([PDFHexString.of(first), PDFHexString.of(first)]);
+    const out = add(await doc.save({ useObjectStreams: false }));
+    const [a, b] = ids(out).map((x) => x.toLowerCase());
+    expect(a).toBe(first);
+    expect(b).not.toBe(first);
+  });
+});

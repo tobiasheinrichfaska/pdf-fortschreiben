@@ -6,6 +6,7 @@
  */
 import {
   TextSink,
+  hex,
   isDict,
   isName,
   isRef,
@@ -25,6 +26,7 @@ import {
   readXrefSection,
   type XrefSection,
 } from './parse.ts';
+import { Sha256 } from './sha256.ts';
 
 /** The largest `/Size` a file may have (what `PdfFile` accepts and `writeUpdate` may write). */
 export const MAX_SIZE = 2147483647;
@@ -291,8 +293,9 @@ export interface Written {
 }
 
 /**
- * Appends the update as a new revision. `trailerExtra` may set `/Info` and other keys; `/Root`, `/ID` are
- * carried over, `/Size` and `/Prev` are set here, and `/Size`, `/Prev`, `/Root`, `/ID`, `/Encrypt` in
+ * Appends the update as a new revision. `trailerExtra` may set `/Info` and other keys; `/Root` is carried
+ * over, `/ID` is kept in its first element and gets a new second one (ISO 32000-1 14.4; a missing `/ID` is
+ * created with both elements equal), `/Size` and `/Prev` are set here, and `/Size`, `/Prev`, `/Root`, `/ID`, `/Encrypt` in
  * `trailerExtra` are refused with an Error. An update without objects is refused.
  */
 export function writeUpdate(
@@ -359,8 +362,27 @@ export function writeUpdate(
   trailer.set('Root', file.rootRef);
   const info = trailerExtra['Info'] ?? file.trailer.entries.get('Info');
   if (info !== undefined) trailer.set('Info', info);
-  const id = file.trailer.entries.get('ID');
-  if (id !== undefined) trailer.set('ID', id);
+  // The second element: first 16 bytes of SHA-256 over the old file and this revision's objects (the
+  // trailer is left out). Deterministic: no clock, no randomness.
+  const second = new Sha256().update(base).update(sink.bytes()).digest().subarray(0, 16);
+  const oldId = file.trailer.entries.get('ID');
+  let first: Uint8Array = second;
+  if (oldId !== undefined) {
+    const a = oldId as PdfObject;
+    const ok =
+      Array.isArray(a) &&
+      a.length === 2 &&
+      a.every(
+        (e) =>
+          e !== null &&
+          typeof e === 'object' &&
+          !Array.isArray(e) &&
+          (e.t === 'str' || e.t === 'hex'),
+      );
+    if (!ok) throw new PdfReadError('syntax', 'trailer /ID is not an array of two strings');
+    first = ((a as PdfObject[])[0] as { bytes: Uint8Array }).bytes;
+  }
+  trailer.set('ID', [hex(first), hex(second)]);
   trailer.set('Prev', prevAt);
   for (const [k, v] of Object.entries(trailerExtra)) if (k !== 'Info') trailer.set(k, v);
   sink.push('trailer\n');

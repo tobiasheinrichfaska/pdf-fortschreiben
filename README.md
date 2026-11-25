@@ -68,8 +68,9 @@ await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelös
   Bibliothek schreibt nur weiter und soll nichts stillschweigend übergehen.
 - `FoundTimeStamp.digest` wird **erst beim Zugriff** über den Puffer des Aufrufers berechnet. Dieser Puffer
   darf sich nach `findDocTimeStamps` nicht mehr ändern.
-- Die Trailer-`/ID` wird aus der Basisdatei **übernommen, nicht ergänzt**. PDF/A-3 verlangt sie: die Basisdatei
-  des Aufrufers muss eine haben. Eine Basisdatei von pdf-lib hat **keine** Trailer-`/ID`; mit
-  `doc.context.trailerInfo.ID` lässt sie sich vor `doc.save()` setzen.
+- Die Trailer-`/ID` (PDF/A-3 verlangt sie) wird bei **jeder** Revision geschrieben: Das erste Element bleibt, das
+  zweite ändert sich (erste 16 Bytes SHA-256 über die alte Datei plus die neuen Objekte, ohne Trailer;
+  deterministisch, ohne Uhr und Zufall). Fehlt die `/ID` (etwa bei pdf-lib), entsteht sie mit beiden Elementen
+  gleich. Eine fehlerhafte `/ID` (kein Array aus zwei Strings) wirft `PdfReadError` (`syntax`).
 - Die Zahl der Objekte (`/Size`) ist auf 2147483647 begrenzt (so viel liest `PdfFile`); `Update.add`, `set` und
   `writeUpdate` lehnen mehr mit einem `Error` ab.
