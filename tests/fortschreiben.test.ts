@@ -14,7 +14,7 @@ import {
   readAttachments,
   sha256Bytes,
 } from '../src/index.ts';
-import { Lexer } from '../src/parse.ts';
+import { Lexer, readXrefSection } from '../src/parse.ts';
 import { TextSink } from '../src/objects.ts';
 import { ascii, basePdf, fakeStamper, text } from './helpers.ts';
 
@@ -176,5 +176,20 @@ describe('document time stamps', () => {
     await expect(
       appendDocTimeStamp(base, async () => Uint8Array.from([0x04, 0x05, 1]), { reserve: 2048 }),
     ).rejects.toThrow('DER');
+  });
+});
+
+describe('xref reader hardening', () => {
+  const read = (s: string) => readXrefSection(new TextEncoder().encode(s), 0);
+  it('refuses a truncated xref table instead of looping', () => {
+    expect(() => read('xref\n0 1\n0000000000 65535 f \n')).toThrow(PdfReadError);
+  });
+  it('refuses a delimiter where a subsection header is expected', () => {
+    expect(() => read('xref\n0 1\n0000000000 65535 f \n<< >>')).toThrow(PdfReadError);
+    expect(() => read('xref\n0 1\n0000000000 65535 f \n)')).toThrow(PdfReadError);
+  });
+  it('refuses non-decimal subsection numbers', () => {
+    expect(() => read('xref\n1e3 1\n0000000000 65535 f \ntrailer\n<< >>')).toThrow(PdfReadError);
+    expect(() => read('xref\n0x10 1\n0000000000 65535 f \ntrailer\n<< >>')).toThrow(PdfReadError);
   });
 });

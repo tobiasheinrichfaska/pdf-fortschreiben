@@ -235,9 +235,13 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
   for (;;) {
     const head = lx.peekWord();
     if (head === 'trailer') break;
-    const start = Number(lx.word());
-    const count = Number(lx.word());
-    if (!Number.isInteger(start) || !Number.isInteger(count) || count < 0)
+    const startText = lx.word();
+    const countText = lx.word();
+    if (!/^\d+$/.test(startText) || !/^\d+$/.test(countText))
+      throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
+    const start = Number(startText);
+    const count = Number(countText);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(count))
       throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
     for (let i = 0; i < count; i++) {
       const offset = Number(lx.word());
