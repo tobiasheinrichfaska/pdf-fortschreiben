@@ -13,8 +13,8 @@ read all of it back (revisions, attachments of any revision, every time stamp th
 byte range and digest). Created 2026-11-24 for the running monthly PDF of `Zeiterfassung` (decision Tobias
 2026-11-24: only time stamps, no personal signature; one PDF per month).
 
-**TEMPORARY LOCATION:** a subdirectory of the `Zeiterfassung` repo because the cloud session could not
-create a repository. **Claude on the PC: extract it next time — follow `HERAUSLOESEN.md`.**
+**Location:** its own repository (decision Tobias 2026-11-25: this repo is the final home; the earlier plan to
+extract it from a `Zeiterfassung` subdirectory is done).
 
 **Platform:** library for browsers and Node (standard APIs only)
 **Language:** TypeScript (erasable syntax only)
@@ -48,7 +48,6 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 | `src/sha256.ts`    | Synchronous SHA-256 (copied from `Zeiterfassung/src/logic/sha256.ts`): `Sha256` class (streaming `update`/`digest`), `sha256Bytes`, `toHex`, `sha256Hex`; `index.ts` exports only `sha256Bytes`     |
 | `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                                |
 | `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                         |
-| `HERAUSLOESEN.md`  | Steps to move this directory into its own repository (delete after doing it)                                                                                                                        |
 
 ## Tests
 
@@ -61,17 +60,16 @@ npm test
 
 ## Open tasks (in this order)
 
-1. Extract into its own repo (`HERAUSLOESEN.md`).
-2. Errors as codes instead of exceptions (`Result`, like `zeitstempel`), keep `PdfReadError` codes.
-3. ESLint config and a guard test „no `node:` in `src/`“ like `zeitstempel` (it must match import statements, not comments: `src/sha256.ts` line 3 mentions `node:crypto`); a coupling test for private names.
-4. DSS (`/DSS` with `/Certs`, later `/OCSPs`/`/CRLs`) as its own revision after a time stamp (PAdES-LTA).
-5. Visible content per day: decide in the app whether a day changes the page's content stream or adds a page;
+1. Errors as codes instead of exceptions (`Result`, like `zeitstempel`), keep `PdfReadError` codes.
+2. ESLint config and a guard test „no `node:` in `src/`“ like `zeitstempel` (it must match import statements, not comments: `src/sha256.ts` line 3 mentions `node:crypto`); a coupling test for private names.
+3. DSS (`/DSS` with `/Certs`, later `/OCSPs`/`/CRLs`) as its own revision after a time stamp (PAdES-LTA).
+4. Visible content per day: decide in the app whether a day changes the page's content stream or adds a page;
    offer a helper here only if it stays app-independent.
-6. Report what changed between revisions (only allowed objects: annotations, AcroForm, attachments, pages).
-7. A build (`dist` + `prepare` or committed build) before an app depends on it by tag.
-8. Async SHA-256 via `crypto.subtle` as an option for big files (the pure-JS `Sha256` runs at ~55 MB/s).
-9. Unify error classes (usage errors `Error`/`RangeError` vs `PdfReadError`, see task 2).
-10. Check output with `qpdf --check` and veraPDF in `scripts/` (qpdf was not installable here).
+5. Report what changed between revisions (only allowed objects: annotations, AcroForm, attachments, pages).
+6. A build (`dist` + `prepare` or committed build) before an app depends on it by tag.
+7. Async SHA-256 via `crypto.subtle` as an option for big files (the pure-JS `Sha256` runs at ~55 MB/s).
+8. Unify error classes (usage errors `Error`/`RangeError` vs `PdfReadError`, see task 2).
+9. Check output with `qpdf --check` and veraPDF in `scripts/` (qpdf was not installable here).
 
 ## Known Limitations
 

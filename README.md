@@ -5,8 +5,7 @@ die früheren Bytes bleiben Byte für Byte gleich. Dazu kommen Dateianhänge (PD
 **Dokument-Zeitstempel** (RFC 3161, PAdES `ETSI.RFC3161`) über den jeweiligen Gesamtstand – ohne Schlüssel
 und ohne Zertifikat des Schreibenden.
 
-**Stand: 0.0.1, Entwurf.** Liegt vorläufig als Unterverzeichnis im Repo `Zeiterfassung`, wird in ein eigenes
-Repo herausgelöst (`HERAUSLOESEN.md`). Nicht auf npm, nicht getaggt, nicht von einem Menschen
+**Stand: 0.0.1, Entwurf.** Eigenes Repository. Nicht auf npm, nicht getaggt, nicht von einem Menschen
 sicherheitsgeprüft, nur unter Node getestet, nicht nach PDF/A validiert.
 
 ## Benutzen
