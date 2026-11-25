@@ -2,7 +2,7 @@
   "name": "pdf-fortschreiben",
   "private": true,
   "version": "0.0.1",
-  "description": "Append revisions to a PDF without rewriting it: associated files (PDF/A-3) and document time stamps (RFC 3161, PAdES ETSI.RFC3161), and read them back. No network, no dependencies.",
+  "description": "Append revisions to a PDF without rewriting it: associated files (PDF/A-3) and document time stamps (RFC 3161, PAdES ETSI.RFC3161), and read them back. No network, no dependencies (pdf-lib only for the optional `pdflib` entry).",
   "license": "AGPL-3.0-only",
   "author": "Tobias Heinrich",
   "type": "module",
@@ -11,7 +11,8 @@
   },
   "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./pdflib": "./src/pdflib.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -19,6 +20,14 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
+  },
+  "peerDependencies": {
+    "pdf-lib": "1.17.1"
+  },
+  "peerDependenciesMeta": {
+    "pdf-lib": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
