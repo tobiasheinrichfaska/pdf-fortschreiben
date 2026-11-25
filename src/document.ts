@@ -118,15 +118,17 @@ export class PdfFile {
   /** The page objects in order (follows `/Kids` from the catalog's `/Pages`). */
   pages(): PdfRef[] {
     const out: PdfRef[] = [];
-    const walk = (r: PdfObject | undefined, depth: number): void => {
-      if (!isRef(r) || depth > 32) return;
+    const seen = new Set<number>();
+    const walk = (r: PdfObject | undefined): void => {
+      if (!isRef(r) || seen.has(r.num)) return;
+      seen.add(r.num);
       const d = this.dict(r);
       if (d === undefined) return;
       const kids = d.entries.get('Kids');
-      if (Array.isArray(kids)) kids.forEach((k) => walk(k, depth + 1));
+      if (Array.isArray(kids)) kids.forEach((k) => walk(k));
       else out.push(r);
     };
-    walk(this.catalog.entries.get('Pages'), 0);
+    walk(this.catalog.entries.get('Pages'));
     return out;
   }
 

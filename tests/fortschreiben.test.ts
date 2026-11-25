@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
 import {
   PdfFile,
+  type PdfRef,
   PdfReadError,
   appendDocTimeStamp,
   appendRevision,
@@ -44,6 +45,25 @@ describe('revisions', () => {
     const f = new PdfFile(await basePdf(2));
     expect(f.revisions).toHaveLength(1);
     expect(f.pages()).toHaveLength(2);
+  });
+
+  it('walks a cyclic or shared /Kids graph once per node', async () => {
+    const base = await basePdf(1);
+    const pagesRef = new PdfFile(base).catalog.entries.get('Pages') as PdfRef;
+    const cyc = appendRevision(base, (_f, u) => {
+      u.set(pagesRef, dict({ Type: name('Pages'), Kids: [pagesRef, pagesRef], Count: 0 }));
+    });
+    expect(new PdfFile(cyc).pages()).toEqual([]);
+    // a chain of 40 nodes, each listing the next one twice, ends in one page
+    const chain = appendRevision(base, (f, u) => {
+      const page = f.pages()[0]!;
+      let next: PdfRef = page;
+      for (let i = 0; i < 40; i++) {
+        next = u.add(dict({ Type: name('Pages'), Kids: [next, next], Count: 1 }));
+      }
+      u.set(pagesRef, dict({ Type: name('Pages'), Kids: [next], Count: 1 }));
+    });
+    expect(new PdfFile(chain).pages()).toHaveLength(1);
   });
 
   it('refuses cross-reference streams', async () => {
