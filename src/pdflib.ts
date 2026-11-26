@@ -138,6 +138,8 @@ export async function prepareDrawnPages(pdf: Uint8Array, draw: Draw): Promise<Dr
 
   // The page list as the written revision will show it: the earlier pages, unchanged and in their
   // order, then only new page objects.
+  // writeUpdate refuses an update without objects; a draw step that changed nothing added no page.
+  if (update.objects.size === 0) throw new PdfLibError('no-new-page', 'draw added no page');
   const oldPages = file.pages().map((r) => r.num);
   const newPages = new PdfFile(writeUpdate(file, update).bytes).pages().map((r) => r.num);
   if (

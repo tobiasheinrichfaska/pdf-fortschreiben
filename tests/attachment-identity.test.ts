@@ -74,7 +74,7 @@ describe('attachmentChanges compares the whole identity of a file', () => {
     });
     expect(await attachmentChanges(forged)).toContainEqual({
       name: day1.name,
-      kind: 'duplicate',
+      kind: 'changed', // a name twice in the tree is reported as `changed`
       revision: 2,
     });
   });

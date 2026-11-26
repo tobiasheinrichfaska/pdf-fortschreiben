@@ -54,11 +54,12 @@ describe('revisions', () => {
       u.set(pagesRef, dict({ Type: name('Pages'), Kids: [pagesRef, pagesRef], Count: 0 }));
     });
     expect(new PdfFile(cyc).pages()).toEqual([]);
-    // a chain of 40 nodes, each listing the next one twice, ends in one page
+    // a chain of 30 nodes (below the depth limit of 32), each listing the next one twice, ends in one
+    // page; without the visited set this would walk 2^30 paths
     const chain = appendRevision(base, (f, u) => {
       const page = f.pages()[0]!;
       let next: PdfRef = page;
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 30; i++) {
         next = u.add(dict({ Type: name('Pages'), Kids: [next, next], Count: 1 }));
       }
       u.set(pagesRef, dict({ Type: name('Pages'), Kids: [next], Count: 1 }));
@@ -80,7 +81,8 @@ describe('revisions', () => {
     const f = new PdfFile(next);
     expect(f.revisions).toHaveLength(2);
     expect(f.revisions[0]!.end).toBe(base.length);
-    expect(ascii(f.revisionBytes(0))).toBe(ascii(base));
+    // plus the single line end after %%EOF (the writer's lead), which a stamp's /ByteRange covers
+    expect(ascii(f.revisionBytes(0))).toBe(ascii(base) + '\n');
     const loaded = await PDFDocument.load(next);
     expect(loaded.getPageCount()).toBe(1);
   });
@@ -165,7 +167,7 @@ describe('document time stamps', () => {
     ]);
     found.forEach((t, i) => {
       expect(t.digest).toEqual(seen[i]);
-      expect(t.token).toEqual(Uint8Array.from([0x04, 32, ...seen[i]!]));
+      expect(t.token).toEqual(Uint8Array.from([0x30, 32, ...seen[i]!]));
       expect(t.byteRange[2]! + t.byteRange[3]!).toBe(
         new PdfFile(s2).revisions[t.revision!]!.end + 1,
       );
@@ -187,14 +189,14 @@ describe('document time stamps', () => {
     await expect(
       appendDocTimeStamp(
         base,
-        async () => Uint8Array.from([0x04, 0x82, 0x08, 0x00, ...new Uint8Array(2048)]),
+        async () => Uint8Array.from([0x30, 0x82, 0x08, 0x00, ...new Uint8Array(2048)]),
         {
           reserve: 2048,
         },
       ),
     ).rejects.toThrow(RangeError);
     await expect(
-      appendDocTimeStamp(base, async () => Uint8Array.from([0x04, 0x05, 1]), { reserve: 2048 }),
+      appendDocTimeStamp(base, async () => Uint8Array.from([0x30, 0x05, 1]), { reserve: 2048 }),
     ).rejects.toThrow('DER');
   });
 });
