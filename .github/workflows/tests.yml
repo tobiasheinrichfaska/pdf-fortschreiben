@@ -1,0 +1,36 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The check only reads the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes the older run pointless.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
+      - name: Smoke test of the build
+        run: node -e "Promise.all([import('./dist/index.js'),import('./dist/pdflib.js')]).then(([m,p])=>{if(typeof m.appendRevision!=='function'||typeof p.appendDrawnPages!=='function')process.exit(1)})"
+      - name: Package contents
+        run: npm pack --dry-run --ignore-scripts

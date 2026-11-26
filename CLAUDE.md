@@ -48,7 +48,7 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 | `src/pdflib.ts`    | Separate entry `pdf-fortschreiben/pdflib` (pdf-lib 1.17.1 optional peer): `prepareDrawnPages`/`appendDrawnPages` (pages drawn by pdf-lib as one revision: only new objects and changed page-tree nodes, asserted numbers; other changes refused with `PdfLibError` codes; the earlier pages must stay the unchanged start of the page list, else `pages-changed`; `/Info` never copied), `reuseFont` (a font of an earlier revision) |
 | `src/sha256.ts`    | Synchronous SHA-256 (copied from the consuming app's own SHA-256): `Sha256` class (streaming `update`/`digest`), `sha256Bytes`, `toHex`, `sha256Hex`; `index.ts` exports only `sha256Bytes`                                                                                                                                                                                                                                          |
 | `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                                                                                                                                                                                                                                                                 |
-| `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                                                                                                                                                                                                                                                          |
+| `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`); build: `prepare.mjs` (`prepare` builds only if typescript resolves, else one line on stderr and exit 0), `clean-dist.mjs`, `fix-declarations.mjs`                                                                                                                                                                       |
 
 ## Tests
 
@@ -57,7 +57,18 @@ npm ci
 npm run typecheck
 npm run format:check
 npm test
+npm run build
 ```
+
+## Build and release
+
+- **0.1.0 with a build (2026-11-26):** `npm run build` writes `dist/` (JS + `.d.ts`, `tsconfig.build.json`); `dist/`
+  is not committed. `prepare` builds on a Git install (consumers: `github:tobiasheinrichfaska/pdf-fortschreiben#v0.1.0`).
+  `exports` `.` and `./pdflib` point to `dist`; pdf-lib stays an optional peer. `tests/package.test.ts` builds a copy
+  with `prepare` (no tsc on PATH) and imports `dist/index.js` and `dist/pdflib.js`. CI: `.github/workflows/tests.yml`
+  (check „Tests“, actions pinned by tag, not by SHA).
+- **Tag `v0.1.0` approved by Tobias, not yet pushed:** Claude on the PC pushes it on the commit of this build (the
+  cloud session cannot push tags).
 
 ## Open tasks (in this order)
 
@@ -67,7 +78,7 @@ npm test
 4. Visible content: new pages drawn by pdf-lib are done (`src/pdflib.ts`, app-independent); changing an
    existing page's content stream is not offered (an app adds pages instead).
 5. Report what changed between revisions (only allowed objects: annotations, AcroForm, attachments, pages).
-6. A build (`dist` + `prepare` or committed build) before an app depends on it by tag.
+6. ~~A build before an app depends on it by tag~~ (done 2026-11-26, see „Build and release“; tag `v0.1.0` pending).
 7. Async SHA-256 via `crypto.subtle` as an option for big files (the pure-JS `Sha256` runs at ~55 MB/s).
 8. Unify error classes (usage errors `Error`/`RangeError` vs `PdfReadError`, see task 2).
 9. Check output with `qpdf --check` and veraPDF in `scripts/` (qpdf was not installable here).
