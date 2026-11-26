@@ -17,7 +17,7 @@ import {
   type PdfObject,
   type PdfRef,
 } from './objects.ts';
-import { PdfReadError, latin1Text } from './parse.ts';
+import { Lexer, PdfReadError, latin1Text } from './parse.ts';
 import { sha256Bytes } from './sha256.ts';
 
 /** Gets a DER TimeStampToken (CMS ContentInfo) for a SHA-256 digest, e.g. through a relay. */
@@ -181,13 +181,54 @@ export function findDocTimeStamps(pdf: Uint8Array): FoundTimeStamp[] {
       if (field === undefined || !isRef(vRef) || found.has(vRef.num)) continue;
       const v = view.dict(vRef);
       if (v === undefined || !isName(v.entries.get('SubFilter'), 'ETSI.RFC3161')) continue;
-      found.set(vRef.num, describe(file, vRef, v, field));
+      found.set(vRef.num, describe(file, view, vRef, v, field));
     }
   }
   return [...found.values()].sort((a, b) => (a.byteRange[2] ?? 0) - (b.byteRange[2] ?? 0));
 }
 
-function describe(file: PdfFile, vRef: PdfRef, v: PdfDict, field: PdfDict): FoundTimeStamp {
+/**
+ * Where the value of `/Contents` of the dictionary object `num` at `offset` stands: from its `<` to just
+ * after its `>`. Null if the object is not a plain dictionary with exactly one `/Contents` hex string.
+ */
+function contentsSpan(
+  bytes: Uint8Array,
+  offset: number,
+  num: number,
+): { start: number; end: number } | null {
+  try {
+    const lx = new Lexer(bytes, offset);
+    if (lx.word() !== String(num) || !/^\d+$/.test(lx.word()) || lx.word() !== 'obj') return null;
+    lx.skipSpace();
+    if (bytes[lx.pos] !== 0x3c || bytes[lx.pos + 1] !== 0x3c) return null;
+    lx.pos += 2;
+    let span: { start: number; end: number } | null = null;
+    for (;;) {
+      lx.skipSpace();
+      if (bytes[lx.pos] === 0x3e && bytes[lx.pos + 1] === 0x3e) break;
+      const key = lx.readObject();
+      if (!isName(key)) return null;
+      lx.skipSpace();
+      const start = lx.pos;
+      const value = lx.readObject();
+      if (key.v === 'Contents') {
+        if (span !== null || bytes[start] !== 0x3c || isDict(value)) return null;
+        span = { start, end: lx.pos };
+      }
+    }
+    return span !== null && bytes[span.end - 1] === 0x3e ? span : null;
+  } catch {
+    return null;
+  }
+}
+
+function describe(
+  file: PdfFile,
+  view: PdfFile,
+  vRef: PdfRef,
+  v: PdfDict,
+  field: PdfDict,
+): FoundTimeStamp {
   const br = v.entries.get('ByteRange');
   const contents = v.entries.get('Contents');
   if (
@@ -209,8 +250,22 @@ function describe(file: PdfFile, vRef: PdfRef, v: PdfDict, field: PdfDict): Foun
     (r) => endAt >= r.end && endAt <= r.end + 2 && /^\r?\n?$/.test(latin1Text(bytes, r.end, endAt)),
   );
   const gap = latin1Text(bytes, b, c);
+  // The excluded bytes must be exactly this dictionary's own /Contents, and the range must end with the
+  // revision that wrote the dictionary (so everything of it but the token is covered).
+  const objAt = view.offsetOf(vRef.num);
+  const span = objAt === undefined ? null : contentsSpan(bytes, objAt, vRef.num);
+  const writtenIn =
+    objAt === undefined
+      ? -1
+      : file.revisions.findIndex(
+          (r, k) => objAt >= (k === 0 ? 0 : file.revisions[k - 1]!.end) && objAt < r.end,
+        );
   const rangeOk =
     a === 0 &&
+    span !== null &&
+    b === span.start &&
+    c === span.end &&
+    revision === writtenIn &&
     c > b &&
     endAt <= bytes.length &&
     revision >= 0 &&

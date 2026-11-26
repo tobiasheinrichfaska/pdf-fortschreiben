@@ -93,6 +93,11 @@ export class PdfFile {
     return o;
   }
 
+  /** Byte offset of object `num` in the newest revision's table (undefined if not in use). */
+  offsetOf(num: number): number | undefined {
+    return this.table.get(num)?.offset;
+  }
+
   /** Follows a reference once; direct objects come back as they are. */
   resolve(o: PdfObject | undefined): PdfObject | PdfStream | undefined {
     return isRef(o) ? this.object(o) : o;
