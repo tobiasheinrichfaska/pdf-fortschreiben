@@ -122,6 +122,27 @@ describe('pdf-lib pages as one revision', () => {
     await expect(appendDrawnPages(base, () => {})).rejects.toMatchObject({ code: 'no-new-page' });
   });
 
+  it('refuses a draw step that removes or reorders earlier pages (old pages must stay a prefix)', async () => {
+    const base = await basePdf(2);
+    const removed = appendDrawnPages(base, (doc) => {
+      doc.removePage(0);
+      doc.addPage();
+      doc.addPage();
+    });
+    await expect(removed).rejects.toMatchObject({ code: 'pages-changed' });
+    const reordered = appendDrawnPages(base, (doc) => {
+      const first = doc.getPage(0);
+      doc.removePage(0);
+      doc.insertPage(1, first);
+      doc.addPage();
+    });
+    await expect(reordered).rejects.toMatchObject({ code: 'pages-changed' });
+    const inFront = appendDrawnPages(base, (doc) => {
+      doc.insertPage(0);
+    });
+    await expect(inFront).rejects.toMatchObject({ code: 'pages-changed' });
+  });
+
   it('refuses a new /Info dictionary (it would not be copied and leave a gap)', async () => {
     const doc = await PDFDocument.create({ updateMetadata: false });
     doc.addPage();

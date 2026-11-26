@@ -36,7 +36,9 @@ export type PdfLibFailure =
   /** pdf-lib created a new `/Info` dictionary (it is never copied, and would leave a gap in the numbers). */
   | 'info-created'
   /** The draw step added no page. */
-  | 'no-new-page';
+  | 'no-new-page'
+  /** The earlier pages are not, in their order, the start of the new page list (removed, moved, inserted). */
+  | 'pages-changed';
 
 export class PdfLibError extends Error {
   readonly code: PdfLibFailure;
@@ -134,13 +136,19 @@ export async function prepareDrawnPages(pdf: Uint8Array, draw: Draw): Promise<Dr
   if (update.size !== Math.max(oldSize, context.largestObjectNumber + 1))
     throw new PdfLibError('numbering', `pdf-lib counter ${context.largestObjectNumber}`);
 
-  const pages = doc
-    .getPages()
-    .map((p) => p.ref)
-    .filter((r) => r.objectNumber >= oldSize)
-    .map((r) => ref(r.objectNumber));
-  if (pages.length === 0 || doc.getPageCount() === pagesBefore)
+  // The page list as the written revision will show it: the earlier pages, unchanged and in their
+  // order, then only new page objects.
+  const oldPages = file.pages().map((r) => r.num);
+  const newPages = new PdfFile(writeUpdate(file, update).bytes).pages().map((r) => r.num);
+  if (
+    newPages.length < oldPages.length ||
+    oldPages.some((n, i) => newPages[i] !== n) ||
+    newPages.slice(oldPages.length).some((n) => n < oldSize)
+  )
+    throw new PdfLibError('pages-changed', 'earlier pages are not kept as the start, in order');
+  if (newPages.length === oldPages.length || doc.getPageCount() === pagesBefore)
     throw new PdfLibError('no-new-page', 'draw added no page');
+  const pages = newPages.slice(oldPages.length).map((n) => ref(n));
   return { file, update, pages };
 }
 
