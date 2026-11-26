@@ -10,11 +10,11 @@
 Append revisions to a PDF without rewriting it (incremental update), attach files as PDF/A-3 associated
 files, add PAdES document time stamps (`/DocTimeStamp`, `SubFilter ETSI.RFC3161`) over the whole state, and
 read all of it back (revisions, attachments of any revision, every time stamp the file ever had with its
-byte range and digest). Created 2026-11-24 for the running monthly PDF of `Zeiterfassung` (decision Tobias
+byte range and digest). Created 2026-11-24 for a running monthly PDF of a web app (decision Tobias
 2026-11-24: only time stamps, no personal signature; one PDF per month).
 
 **Location:** its own repository (decision Tobias 2026-11-25: this repo is the final home; the earlier plan to
-extract it from a `Zeiterfassung` subdirectory is done).
+extract it from a subdirectory of the consuming app is done).
 
 **Platform:** library for browsers and Node (standard APIs only)
 **Language:** TypeScript (erasable syntax only)
@@ -46,7 +46,7 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 | `src/attach.ts`    | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, **add only**: a used name is refused), `readAttachments`, `attachmentChanges` (files a later revision removed or changed)                                                                                                                                                                                                                                   |
 | `src/timestamp.ts` | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest`                                                                                                                                                                                                                                                                                                     |
 | `src/pdflib.ts`    | Separate entry `pdf-fortschreiben/pdflib` (pdf-lib 1.17.1 optional peer): `prepareDrawnPages`/`appendDrawnPages` (pages drawn by pdf-lib as one revision: only new objects and changed page-tree nodes, asserted numbers; other changes refused with `PdfLibError` codes; the earlier pages must stay the unchanged start of the page list, else `pages-changed`; `/Info` never copied), `reuseFont` (a font of an earlier revision) |
-| `src/sha256.ts`    | Synchronous SHA-256 (copied from `Zeiterfassung/src/logic/sha256.ts`): `Sha256` class (streaming `update`/`digest`), `sha256Bytes`, `toHex`, `sha256Hex`; `index.ts` exports only `sha256Bytes`                                                                                                                                                                                                                                      |
+| `src/sha256.ts`    | Synchronous SHA-256 (copied from the consuming app's own SHA-256): `Sha256` class (streaming `update`/`digest`), `sha256Bytes`, `toHex`, `sha256Hex`; `index.ts` exports only `sha256Bytes`                                                                                                                                                                                                                                      |
 | `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                                                                                                                                                                                                                                                                 |
 | `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                                                                                                                                                                                                                                                          |
 
