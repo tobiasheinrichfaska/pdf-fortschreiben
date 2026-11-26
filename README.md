@@ -5,8 +5,20 @@ die früheren Bytes bleiben Byte für Byte gleich. Dazu kommen Dateianhänge (PD
 **Dokument-Zeitstempel** (RFC 3161, PAdES `ETSI.RFC3161`) über den jeweiligen Gesamtstand – ohne Schlüssel
 und ohne Zertifikat des Schreibenden.
 
-**Stand: 0.0.1, Entwurf.** Eigenes Repository. Nicht auf npm, nicht getaggt, nicht von einem Menschen
-sicherheitsgeprüft, nur unter Node getestet, nicht nach PDF/A validiert.
+**Stand: 0.1.0, mit Build** (`dist/`, beim Git-Install von `prepare` gebaut). Eigenes Repository. Nicht auf
+npm; Tag `v0.1.0` freigegeben, noch nicht gepusht. Nicht von einem Menschen sicherheitsgeprüft, nur unter Node
+getestet, nicht nach PDF/A validiert.
+
+## Einbinden
+
+```bash
+npm install github:tobiasheinrichfaska/pdf-fortschreiben#v0.1.0
+npm install pdf-lib@1.17.1   # nur für den Eingang `pdf-fortschreiben/pdflib`
+```
+
+Beim Git-Install baut `prepare` das Verzeichnis `dist/` (JavaScript und Typen); `npm run build` baut es im
+Repository. Fehlt TypeScript (`--omit=dev`), überspringt `prepare` den Bau mit einer Zeile auf stderr; ein
+Typfehler bricht den Bau laut ab.
 
 ## Benutzen
 
