@@ -7,8 +7,10 @@
  */
 import { PdfFile, Update } from './document.ts';
 import {
+  TextSink,
   dict,
   isDict,
+  isName,
   isRef,
   isStringLike,
   latin1,
@@ -18,7 +20,7 @@ import {
   type PdfObject,
   type PdfRef,
 } from './objects.ts';
-import { PdfReadError, isStream } from './parse.ts';
+import { PdfReadError, isStream, latin1Text } from './parse.ts';
 import { sha256Bytes } from './sha256.ts';
 
 export type Relationship = 'Data' | 'Source' | 'Alternative' | 'Supplement' | 'Unspecified';
@@ -173,28 +175,98 @@ export async function readAttachments(file: PdfFile): Promise<FoundAttachment[]>
 
 export interface AttachmentChange {
   readonly name: string;
-  readonly kind: 'removed' | 'changed';
-  /** The first revision (index) in which the file is missing or different. */
+  /**
+   * `removed`: the name is gone; `changed`: its identity differs (names `/F` `/UF`, the bytes and
+   * dictionary of `/EF /F` and `/EF /UF`, MIME type, `/AFRelationship`, membership in the catalog's
+   * `/AF`); `duplicate`: the name stands more than once in the name tree.
+   */
+  readonly kind: 'removed' | 'changed' | 'duplicate';
+  /** The first revision (index) in which the file is missing, different or doubled. */
   readonly revision: number;
 }
 
+/** A stream as text: its dictionary entries that shape the content, and the SHA-256 of its bytes. */
+function streamIdentity(file: PdfFile, o: PdfObject | undefined): string {
+  if (o === undefined) return '-';
+  const s = file.resolve(o);
+  if (!isStream(s)) return 'not-a-stream';
+  const sink = new TextSink();
+  for (const k of ['Type', 'Subtype', 'Filter', 'DecodeParms', 'Params']) {
+    sink.push(`/${k} `);
+    const v = s.dict.entries.get(k);
+    if (v !== undefined) sink.write(isRef(v) ? (file.resolve(v) as PdfObject) : v);
+    sink.push('|');
+  }
+  return latin1Text(sink.bytes(), 0, sink.size) + hexDigest(s.data);
+}
+
+const bytesHex = (o: PdfObject | undefined): string =>
+  isStringLike(o) ? Array.from(o.bytes, (b) => b.toString(16).padStart(2, '0')).join('') : '-';
+
+/** For every key of the `/EmbeddedFiles` name tree: the identity of each entry under that key. */
+function identities(file: PdfFile): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const names = file.dict(file.catalog.entries.get('Names'));
+  const tree = names === undefined ? undefined : file.dict(names.entries.get('EmbeddedFiles'));
+  const pairs = file.resolve(tree?.entries.get('Names'));
+  if (!Array.isArray(pairs)) return out;
+  const afList = file.resolve(file.catalog.entries.get('AF'));
+  const inAf = new Set<number>();
+  if (Array.isArray(afList)) for (const item of afList) if (isRef(item)) inAf.add(item.num);
+  for (let i = 0; i + 1 < pairs.length; i += 2) {
+    const key = keyText(pairs[i]);
+    if (key === undefined) continue;
+    const value = pairs[i + 1]!;
+    let id: string;
+    try {
+      const spec = file.dict(value);
+      if (spec === undefined) id = 'unreadable';
+      else {
+        const ef = file.dict(spec.entries.get('EF'));
+        const rel = spec.entries.get('AFRelationship');
+        id = [
+          'F=' + bytesHex(file.resolve(spec.entries.get('F')) as PdfObject),
+          'UF=' + bytesHex(file.resolve(spec.entries.get('UF')) as PdfObject),
+          'EF/F=' + streamIdentity(file, ef?.entries.get('F')),
+          'EF/UF=' + streamIdentity(file, ef?.entries.get('UF')),
+          'AFRelationship=' + (isName(rel) ? rel.v : '-'),
+          'AF=' + (isRef(value) && inAf.has(value.num) ? 'yes' : 'no'),
+        ].join('\n');
+      }
+    } catch {
+      id = 'unreadable';
+    }
+    const list = out.get(key) ?? [];
+    list.push(id);
+    out.set(key, list);
+  }
+  return out;
+}
+
 /**
- * Files that an earlier revision had and a later one lost or changed (same name, other bytes). With
- * add-only writing this list is empty; anything in it means someone rewrote history after the fact.
+ * Files that an earlier revision had and a later one lost or changed (same name, other identity), and
+ * names that stand twice in a revision's name tree. With add-only writing this list is empty; anything in
+ * it means someone rewrote history after the fact.
  */
 export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChange[]> {
   const file = new PdfFile(pdf);
   const seen = new Map<string, string>();
   const out: AttachmentChange[] = [];
   const reported = new Set<string>();
+  const duplicates = new Set<string>();
   for (let i = 0; i < file.revisions.length; i++) {
     const now = new Map<string, string>();
-    for (const a of await readAttachments(new PdfFile(file.revisionBytes(i))))
-      now.set(a.name, hexDigest(a.data));
-    for (const [n, digest] of seen) {
+    for (const [n, list] of identities(new PdfFile(file.revisionBytes(i)))) {
+      if (list.length > 1 && !duplicates.has(n)) {
+        out.push({ name: n, kind: 'duplicate', revision: i });
+        duplicates.add(n);
+      }
+      now.set(n, list.join('\n--\n'));
+    }
+    for (const [n, id] of seen) {
       if (reported.has(n)) continue;
       const d = now.get(n);
-      if (d === undefined || d !== digest) {
+      if (d === undefined || d !== id) {
         out.push({ name: n, kind: d === undefined ? 'removed' : 'changed', revision: i });
         reported.add(n);
       }

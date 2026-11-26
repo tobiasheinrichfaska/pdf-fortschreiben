@@ -27,7 +27,7 @@ let pdf = appendRevision(pdf0, (file, update) =>
 pdf = await appendDocTimeStamp(pdf, async (sha256) => holeToken(sha256));
 // 3. Prüfen: jeder Stempel, den die Datei je hatte, mit Revision, Bereich und Hash
 for (const t of findDocTimeStamps(pdf)) prüfeToken(t.token, t.digest); // z. B. verifyTimestampToken
-await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelöscht oder geändert
+await attachmentChanges(pdf); // [] = kein früherer Anhang später gelöscht, geändert (Namen, Bytes, MIME, AF) oder doppelt
 ```
 
 ### Seiten mit pdf-lib zeichnen (Eingang `pdf-fortschreiben/pdflib`)
