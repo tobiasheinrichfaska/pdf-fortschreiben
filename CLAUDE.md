@@ -10,11 +10,11 @@
 Append revisions to a PDF without rewriting it (incremental update), attach files as PDF/A-3 associated
 files, add PAdES document time stamps (`/DocTimeStamp`, `SubFilter ETSI.RFC3161`) over the whole state, and
 read all of it back (revisions, attachments of any revision, every time stamp the file ever had with its
-byte range and digest). Created 2026-11-24 for the running monthly PDF of `Zeiterfassung` (decision Tobias
+byte range and digest). Created 2026-11-24 for a running monthly PDF of a web app (decision Tobias
 2026-11-24: only time stamps, no personal signature; one PDF per month).
 
 **Location:** its own repository (decision Tobias 2026-11-25: this repo is the final home; the earlier plan to
-extract it from a `Zeiterfassung` subdirectory is done).
+extract it from a subdirectory of the consuming app is done).
 
 **Platform:** library for browsers and Node (standard APIs only)
 **Language:** TypeScript (erasable syntax only)
@@ -31,23 +31,24 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
   (`attachmentChanges`).
 - **Only files with a classic xref table** are continued; xref streams, object streams and hybrid files and
   encrypted files (`/Encrypt`) are refused with a code (`PdfReadError.code`). No general-purpose PDF parser.
-- Core imports nothing from `node:` and no `fetch`/`Buffer`/`process` (tests may).
+- Core imports nothing from `node:` and nothing from pdf-lib (only `src/pdflib.ts`, a separate entry, does) and no `fetch`/`Buffer`/`process` (tests may).
 - Nothing is published, tagged or released without Tobias' OK.
 
 ## Project Directory
 
-| File/Folder        | Purpose                                                                                                                                                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.ts`     | Public exports and `appendRevision` (build one revision with a callback)                                                                                                                            |
-| `src/objects.ts`   | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets), serializer (`TextSink`), type guards                                                                                |
-| `src/errors.ts`    | `PdfReadError` and `ReadFailure` codes; own file so `objects.ts` and `parse.ts` do not import each other                                                                                            |
-| `src/parse.ts`     | Lexer, indirect objects, classic xref sections, `readRevisionEnd`; re-exports `PdfReadError`                                                                                                        |
-| `src/document.ts`  | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`), `Update`, `writeUpdate`, `MAX_SIZE`; refuses `/Linearized` and non-sequential `/Prev` chains (code `linearized`) |
-| `src/attach.ts`    | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, **add only**: a used name is refused), `readAttachments`, `attachmentChanges` (files a later revision removed or changed)  |
-| `src/timestamp.ts` | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest`                                                                    |
-| `src/sha256.ts`    | Synchronous SHA-256 (copied from `Zeiterfassung/src/logic/sha256.ts`): `Sha256` class (streaming `update`/`digest`), `sha256Bytes`, `toHex`, `sha256Hex`; `index.ts` exports only `sha256Bytes`     |
-| `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                                |
-| `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                         |
+| File/Folder        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/index.ts`     | Public exports and `appendRevision` (build one revision with a callback)                                                                                                                                                                                                                                                                                                                                                             |
+| `src/objects.ts`   | Object model (`dict`, `name`, `ref`, `raw` placeholders with reported offsets), serializer (`TextSink`), type guards                                                                                                                                                                                                                                                                                                                 |
+| `src/errors.ts`    | `PdfReadError` and `ReadFailure` codes; own file so `objects.ts` and `parse.ts` do not import each other                                                                                                                                                                                                                                                                                                                             |
+| `src/parse.ts`     | Lexer, indirect objects, classic xref sections, `readRevisionEnd`; re-exports `PdfReadError`                                                                                                                                                                                                                                                                                                                                         |
+| `src/document.ts`  | `PdfFile` (revisions oldest first, objects of the newest, pages, `revisionBytes`), `Update`, `writeUpdate`, `MAX_SIZE`; refuses `/Linearized` and non-sequential `/Prev` chains (code `linearized`)                                                                                                                                                                                                                                  |
+| `src/attach.ts`    | `attachFile` (EmbeddedFile + Filespec + `/Names /EmbeddedFiles` + `/AF`, **add only**: a used name is refused), `readAttachments`, `attachmentChanges` (files a later revision removed or changed)                                                                                                                                                                                                                                   |
+| `src/timestamp.ts` | `appendDocTimeStamp` (placeholder, `/ByteRange`, digest, token), `findDocTimeStamps` (all revisions), `derLength`, `rangeDigest`                                                                                                                                                                                                                                                                                                     |
+| `src/pdflib.ts`    | Separate entry `pdf-fortschreiben/pdflib` (pdf-lib 1.17.1 optional peer): `prepareDrawnPages`/`appendDrawnPages` (pages drawn by pdf-lib as one revision: only new objects and changed page-tree nodes, asserted numbers; other changes refused with `PdfLibError` codes; the earlier pages must stay the unchanged start of the page list, else `pages-changed`; `/Info` never copied), `reuseFont` (a font of an earlier revision) |
+| `src/sha256.ts`    | Synchronous SHA-256 (copied from the consuming app's own SHA-256): `Sha256` class (streaming `update`/`digest`), `sha256Bytes`, `toHex`, `sha256Hex`; `index.ts` exports only `sha256Bytes`                                                                                                                                                                                                                                          |
+| `tests/`           | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                                                                                                                                                                                                                                                                 |
+| `scripts/`         | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`)                                                                                                                                                                                                                                                                                                                          |
 
 ## Tests
 
@@ -63,8 +64,8 @@ npm test
 1. Errors as codes instead of exceptions (`Result`, like `zeitstempel`), keep `PdfReadError` codes.
 2. ESLint config and a guard test „no `node:` in `src/`“ like `zeitstempel` (it must match import statements, not comments: `src/sha256.ts` line 3 mentions `node:crypto`); a coupling test for private names.
 3. DSS (`/DSS` with `/Certs`, later `/OCSPs`/`/CRLs`) as its own revision after a time stamp (PAdES-LTA).
-4. Visible content per day: decide in the app whether a day changes the page's content stream or adds a page;
-   offer a helper here only if it stays app-independent.
+4. Visible content: new pages drawn by pdf-lib are done (`src/pdflib.ts`, app-independent); changing an
+   existing page's content stream is not offered (an app adds pages instead).
 5. Report what changed between revisions (only allowed objects: annotations, AcroForm, attachments, pages).
 6. A build (`dist` + `prepare` or committed build) before an app depends on it by tag.
 7. Async SHA-256 via `crypto.subtle` as an option for big files (the pure-JS `Sha256` runs at ~55 MB/s).
@@ -92,7 +93,8 @@ npm test
   intact; a viewer may still show a warning. The library's own check for removed or changed files is
   `attachmentChanges`.
 - `findDocTimeStamps` does not abort on a malformed stamp: the entry has `error`, `rangeOk` and `tokenOk` false.
-  `rangeOk` means the range covers everything up to the revision's end except exactly its own `/Contents`.
+  `rangeOk` means the range covers everything up to the revision's end except exactly its own `/Contents`,
+  and that `/Contents` was written in that revision.
 - A `Stamper` answer must be one DER SEQUENCE; BER indefinite length is rejected. `derLength` only measures.
 - `readAttachments` decodes only uncompressed or single `FlateDecode` streams; others come back raw with
   `unsupportedFilter` and `filter`. `attachFile` refuses name trees with `/Kids`, reading follows them.

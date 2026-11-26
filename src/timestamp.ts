@@ -331,6 +331,9 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
   const rangeOk =
     validRange(bytes.length, range) && // a = 0, b <= c, c + d <= length (an empty gap fails isOwnContents)
     revision >= 0 &&
+    // the stamp dictionary must be written by the revision the range ends with, so the range covers
+    // everything of it but the token (an older dictionary could be re-used for a later revision)
+    b >= (revision === 0 ? 0 : file.revisions[revision - 1]!.end) &&
     isOwnContents(bytes, num, b, c, contents.bytes);
   const len = derLength(contents.bytes);
   const tokenOk =

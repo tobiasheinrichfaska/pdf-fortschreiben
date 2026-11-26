@@ -31,8 +31,31 @@ for (const t of findDocTimeStamps(pdf)) {
     throw new Error(`Stempel ${t.field}: ${t.error ?? 'Bereich/Token'}`);
   prüfeToken(t.token, t.digest); // z. B. verifyTimestampToken
 }
-await attachmentChanges(pdf); // [] = kein früherer Anhang wurde später gelöscht oder geändert
+await attachmentChanges(pdf); // [] = kein früherer Anhang später gelöscht, geändert (Namen, Bytes, MIME, AF) oder doppelt
 ```
+
+### Seiten mit pdf-lib zeichnen (Eingang `pdf-fortschreiben/pdflib`)
+
+pdf-lib (1.17.1, optionale Peer-Abhängigkeit) zeichnet neue Seiten; angehängt werden nur die **neuen
+Objekte** und die **geänderten Knoten des Seitenbaums**, als eine Revision. Andere Änderungen von pdf-lib
+werden abgelehnt (`PdfLibError`), `/Info` wird nie übernommen. In derselben Revision können Anhänge folgen:
+
+```ts
+import { attachFile, writeUpdate } from 'pdf-fortschreiben';
+import { prepareDrawnPages, reuseFont } from 'pdf-fortschreiben/pdflib';
+
+const { file, update } = await prepareDrawnPages(pdf, async (doc) => {
+  // Schrift der ersten Revision wiederverwenden (dort vollständig eingebettet, `subset: false`)
+  const font = await reuseFont(doc, 'NotoSans-Regular', () =>
+    CustomFontEmbedder.for(fontkit, schriftBytes, 'NotoSans-Regular'),
+  );
+  doc.addPage().drawText('Stand 03.', { x: 50, y: 780, size: 12, font });
+});
+attachFile(file, update, { name: 'monat-tag-03.json', data, mimeType: 'application/json' });
+pdf = writeUpdate(file, update).bytes; // nur Seiten: appendDrawnPages(pdf, zeichne)
+```
+
+Ohne `reuseFont` bettet jede Revision ihre Schrift (bzw. ihre Teilmenge) neu ein.
 
 ## Grenzen
 
