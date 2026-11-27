@@ -1,7 +1,7 @@
 // Independent checks of the library's output: openssl ts -verify, pdfsig, pyHanko, pikepdf.
 // Run from the library directory after scripts/pki.sh.
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import {
@@ -13,6 +13,7 @@ import {
   type Result,
   type Update,
 } from '../src/index.ts';
+import { makeStamper } from './teststamper.ts';
 
 const root = resolve(import.meta.dirname, '..');
 const tmp = resolve(root, '.tmp');
@@ -20,34 +21,13 @@ const pki = resolve(tmp, 'pki');
 mkdirSync(tmp, { recursive: true });
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
 const te = new TextEncoder();
-let n = 0;
 
 const need = <T>(r: Result<T>): T => {
   if (!r.ok) throw new Error(`${r.code}: ${r.detail}`);
   return r.value;
 };
 
-const stamper = async (digest: Uint8Array): Promise<Uint8Array> => {
-  n++;
-  const q = resolve(tmp, `query${n}.tsq`);
-  const tok = resolve(tmp, `token${n}.der`);
-  const query = execFileSync('openssl', [
-    'ts',
-    '-query',
-    '-digest',
-    hex(digest),
-    '-sha256',
-    '-cert',
-    '-no_nonce',
-  ]);
-  writeFileSync(q, query);
-  execFileSync(
-    'openssl',
-    ['ts', '-reply', '-config', resolve(pki, 'ts.cnf'), '-queryfile', q, '-token_out', '-out', tok],
-    { cwd: pki },
-  );
-  return new Uint8Array(readFileSync(tok));
-};
+const stamper = makeStamper(tmp, pki);
 
 const doc = await PDFDocument.create();
 const font = await doc.embedFont(StandardFonts.Helvetica);
