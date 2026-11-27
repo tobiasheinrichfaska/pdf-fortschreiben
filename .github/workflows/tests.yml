@@ -35,3 +35,25 @@ jobs:
         run: node -e "Promise.all([import('./dist/index.js'),import('./dist/pdflib.js')]).then(([m,p])=>{if(typeof m.appendRevision!=='function'||typeof p.appendDrawnPages!=='function')process.exit(1)})"
       - name: Package contents
         run: npm pack --dry-run --ignore-scripts
+
+  # qpdf and veraPDF run as separate programs for checking only; nothing of them is linked or shipped.
+  external:
+    name: External checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Official image of the veraPDF CLI (not verified on a first run yet: adjust the tag if the pull fails).
+      VERAPDF_IMAGE_TAG: v1.28.2
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install qpdf
+        run: sudo apt-get update && sudo apt-get install -y qpdf
+      - name: qpdf, veraPDF (PDF/A-3b, differential against the base)
+        env:
+          VERAPDF: ${{ github.workspace }}/scripts/verapdf-docker.sh
+        run: npm run extern:validitaet

@@ -57,6 +57,7 @@ store (the token comes from a `Stamper` the caller passes; verifying it is the c
 | `src/sha256.ts`               | Synchronous SHA-256 (copied from the consuming app's own SHA-256): `Sha256` class (streaming `update`/`digest`), `sha256Bytes`, `toHex`, `sha256Hex`; `index.ts` exports only `sha256Bytes`                                                                                                                                                                                                                                            |
 | `tests/`                      | Vitest; base PDFs from pdf-lib (dev dependency only)                                                                                                                                                                                                                                                                                                                                                                                   |
 | `scripts/`                    | External check: test PKI + `openssl ts` stamper, `openssl ts -verify`, `pdfsig`, pyHanko (`npm run extern`); build: `prepare.mjs` (`prepare` builds only if typescript resolves, else one line on stderr and exit 0), `clean-dist.mjs`, `fix-declarations.mjs`                                                                                                                                                                         |
+| `scripts/extern-validitaet.ts` | `npm run extern:validitaet`: writes outputs to `.tmp/extern/` (`ausgaben.ts`), `qpdf --check` on each, veraPDF `--flavour 3b` differential against the base; `verapdf.ts` = pure report parser/comparison (tested in `tests/verapdf.test.ts`), `teststamper.ts` = test-PKI stamper shared with `extern-pruefen.ts`, `verapdf-docker.sh` = CI wrapper |
 | `SECURITY.md`                 | How to report a vulnerability; what never to put into issues                                                                                                                                                                                                                                                                                                                                                                           |
 | `eslint.config.js`            | TypeScript strict; `src/` may not import `node:` or use `fetch`/`process`/`Buffer`                                                                                                                                                                                                                                                                                                                                                     |
 | `tests/coupling.test.ts`      | Guard tests: core uses standard APIs only; no private project names in files or commit messages                                                                                                                                                                                                                                                                                                                                        |
@@ -71,7 +72,10 @@ npm run lint
 npm run format:check
 npm test
 npm run build
+npm run extern:validitaet   # needs openssl, qpdf, veraPDF; runs in CI job "External checks"
 ```
+
+`tests/verapdf.test.ts` tests the report comparison with fixture strings (no external tool).
 
 ## Build and release
 
@@ -94,7 +98,7 @@ npm run build
 6. ~~A build before an app depends on it by tag~~ (done 2026-11-26, see „Build and release“; tag `v0.1.0` pending).
 7. Async SHA-256 via `crypto.subtle` as an option for big files (the pure-JS `Sha256` runs at ~55 MB/s).
 8. ~~Unify error classes (usage errors vs `PdfReadError`)~~ (done 2026-11-27: one `Failure` with `code`).
-9. Check output with `qpdf --check` and veraPDF in `scripts/` (qpdf was not installable here).
+9. Check output with `qpdf --check` and veraPDF in `scripts/`: **written 2026-11-27, done in CI pending the first green run** (job `external` „External checks“, `npm run extern:validitaet`). qpdf/veraPDF/Java cannot be installed on the PC, so the job has never run; the veraPDF image tag and the report parsing against real output are unverified.
 
 ## Known Limitations
 
@@ -102,8 +106,10 @@ npm run build
   dictionary, or a `/Prev` chain whose revisions do not lie one after the other, cannot be continued by appending.
 - **Leading junk before `%PDF` is not supported:** offsets are taken relative to the file start, not the header;
   such a file fails with a code (not continued).
-- **Not validated:** no PDF/A checker (veraPDF) run; the invisible widget has `/F 132` and an empty
-  appearance stream, which PDF/A-3 should accept, unchecked.
+- **Not validated (yet):** no `qpdf --check` and no veraPDF run has ever succeeded; the CI job `external` is written
+  but has not run green. veraPDF is a **differential** check (PDF/A-3b): pdf-lib's base is not PDF/A, so a result
+  may fail only rules (clause/testNumber) the base fails too. The invisible widget has `/F 132` and an empty
+  appearance stream, which PDF/A-3 should accept, unchecked until then.
 - `appendDocTimeStamp` reserves `options.reserve` bytes for the token (default 16384, allowed 1024..65536 else `bad-options`); a longer token is `token-too-large`.
 - `PdfFile.revisionBytes(i)` includes the single line end after `%%EOF`; it is a prefix of the updated file, not necessarily byte-equal to the original base.
 - **Trailer `/ID`:** every revision writes `/ID [<A> <B>]` as hex strings. B = first 16 bytes of SHA-256 over the old file plus the new revision's objects (trailer excluded), so deterministic (no clock, no randomness). A is kept from the old `/ID`; a file without `/ID` gets A = B. A malformed `/ID` (not an array of two strings) is failure `syntax`.
@@ -133,3 +139,7 @@ npm run build
   page annotations. A malformed name tree key makes `attachmentChanges` fail with `syntax` (fail loud, intended).
   `attachFile` refuses a catalog `/AF` that is not an array.
 - The external check depends on `openssl`, `pdfsig` and pyHanko on the machine; see `scripts/`.
+- `npm run extern:validitaet` needs `openssl`, `qpdf` and veraPDF (env `VERAPDF` = command; CI uses the official
+  `verapdf/cli` Docker image via `scripts/verapdf-docker.sh`, tag in `tests.yml`); a missing tool stops it with one
+  line and exit 2, never a pass. **Licenses:** qpdf (Apache 2.0) and veraPDF (GPLv3+/MPL 2.0) are used only as
+  separate programs for checking; nothing is linked, vendored, installed as a dependency or shipped.
