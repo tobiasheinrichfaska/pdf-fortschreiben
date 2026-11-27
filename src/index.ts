@@ -65,6 +65,8 @@ export { sha256Bytes } from './sha256.ts';
  */
 export function appendRevision(
   pdf: Uint8Array,
+  // `void` so that a block-bodied callback without a return statement is accepted
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
   build: (file: PdfFile, update: Update) => Result<unknown> | void,
 ): Result<Uint8Array> {
   return guard(() => {
