@@ -32,6 +32,7 @@
   "scripts": {
     "test": "vitest run",
     "extern": "bash scripts/pki.sh && node scripts/extern-pruefen.ts",
+    "extern:validitaet": "bash scripts/pki.sh && node scripts/extern-validitaet.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",

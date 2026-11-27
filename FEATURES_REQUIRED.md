@@ -2,7 +2,7 @@
 
 **Purpose:** Core workflows that must not break. Audit validates these end-to-end.
 Status 2026-11-27: library built (see CLAUDE.md). `[x]` = covered by automated tests (`tests/`);
-`[ ]` = not yet validated (no PDF/A checker run, task 9 in CLAUDE.md).
+`[ ]` = not yet validated.
 
 - [x] **Append a revision** — `old bytes + new revision`; the earlier bytes are never changed (prefix check)
 - [x] **Attach a file (PDF/A-3, add only)** — name tree + `/AF`; a duplicate or changed name is refused or reported
@@ -12,7 +12,7 @@ Status 2026-11-27: library built (see CLAUDE.md). `[x]` = covered by automated t
 - [x] **Malformed input fails loudly** — a `Result` failure with a code (`Failure.code`), no silent drop and no exception from the public API; deep or cyclic trees refused
 - [x] **Draw new pages with pdf-lib** — earlier pages stay the start of the page list
 - [x] **No app data and no `node:` imports in `src/`** — guard test `tests/coupling.test.ts`
-- [ ] **Output passes external checkers** — `openssl ts -verify`, pyHanko, pikepdf checked by hand (`npm run extern`); `qpdf --check` and veraPDF not run
+- [x] **Output passes external checkers** — `openssl ts -verify`, pyHanko, pikepdf checked by hand (`npm run extern`); `qpdf --check` and veraPDF (differential, PDF/A-3b) via `npm run extern:validitaet` in the CI job "External checks" (green 2026-11-27)
 
 | Path                                      | Impact                                       | Audit Check                                                                    |
 | ----------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------ |
