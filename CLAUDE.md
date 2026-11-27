@@ -98,7 +98,7 @@ npm run extern:validitaet   # needs openssl, qpdf, veraPDF; runs in CI job "Exte
 6. ~~A build before an app depends on it by tag~~ (done 2026-11-26, see „Build and release“; tag `v0.1.0` pending).
 7. Async SHA-256 via `crypto.subtle` as an option for big files (the pure-JS `Sha256` runs at ~55 MB/s).
 8. ~~Unify error classes (usage errors vs `PdfReadError`)~~ (done 2026-11-27: one `Failure` with `code`).
-9. Check output with `qpdf --check` and veraPDF in `scripts/`: **written 2026-11-27, done in CI pending the first green run** (job `external` „External checks“, `npm run extern:validitaet`). qpdf/veraPDF/Java cannot be installed on the PC, so the job has never run; the veraPDF image tag and the report parsing against real output are unverified.
+9. ~~Check output with `qpdf --check` and veraPDF in `scripts/`~~ (done 2026-11-27: CI job `external` „External checks“, `npm run extern:validitaet`; first green run: qpdf OK on all four outputs, veraPDF no new failed rule against the base).
 
 ## Known Limitations
 
@@ -106,10 +106,9 @@ npm run extern:validitaet   # needs openssl, qpdf, veraPDF; runs in CI job "Exte
   dictionary, or a `/Prev` chain whose revisions do not lie one after the other, cannot be continued by appending.
 - **Leading junk before `%PDF` is not supported:** offsets are taken relative to the file start, not the header;
   such a file fails with a code (not continued).
-- **Not validated (yet):** no `qpdf --check` and no veraPDF run has ever succeeded; the CI job `external` is written
-  but has not run green. veraPDF is a **differential** check (PDF/A-3b): pdf-lib's base is not PDF/A, so a result
-  may fail only rules (clause/testNumber) the base fails too. The invisible widget has `/F 132` and an empty
-  appearance stream, which PDF/A-3 should accept, unchecked until then.
+- **PDF/A is checked only differentially:** CI runs veraPDF (PDF/A-3b) on pdf-lib's base, which is not PDF/A itself
+  (4 failed rules on 2026-11-27); a result may fail only rules (clause/testNumber) the base fails too. This shows the
+  appended revisions add no new violation, not that a result is PDF/A conformant.
 - `appendDocTimeStamp` reserves `options.reserve` bytes for the token (default 16384, allowed 1024..65536 else `bad-options`); a longer token is `token-too-large`.
 - `PdfFile.revisionBytes(i)` includes the single line end after `%%EOF`; it is a prefix of the updated file, not necessarily byte-equal to the original base.
 - **Trailer `/ID`:** every revision writes `/ID [<A> <B>]` as hex strings. B = first 16 bytes of SHA-256 over the old file plus the new revision's objects (trailer excluded), so deterministic (no clock, no randomness). A is kept from the old `/ID`; a file without `/ID` gets A = B. A malformed `/ID` (not an array of two strings) is failure `syntax`.
