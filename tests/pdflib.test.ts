@@ -1,4 +1,12 @@
-import { PDFDocument, PDFName, StandardFontEmbedder, StandardFonts, rgb } from 'pdf-lib';
+import {
+  PDFArray,
+  PDFDocument,
+  PDFName,
+  PDFRef,
+  StandardFontEmbedder,
+  StandardFonts,
+  rgb,
+} from 'pdf-lib';
 import {
   PdfFile,
   appendDocTimeStamp,
@@ -120,6 +128,17 @@ describe('pdf-lib pages as one revision', () => {
     await expect(changed).rejects.toThrow(PdfLibError);
     await expect(changed).rejects.toMatchObject({ code: 'changed-object' });
     await expect(appendDrawnPages(base, () => {})).rejects.toMatchObject({ code: 'no-new-page' });
+  });
+
+  it('refuses a draw step that deletes an earlier object (its loss would be dropped silently)', async () => {
+    const base = await basePdf();
+    const deleted = appendDrawnPages(base, (doc) => {
+      const contents = doc.getPage(0).node.lookup(PDFName.of('Contents'), PDFArray);
+      expect(doc.context.delete(contents.get(0) as PDFRef)).toBe(true);
+      doc.addPage();
+    });
+    await expect(deleted).rejects.toMatchObject({ code: 'changed-object' });
+    await expect(deleted).rejects.toThrow(/deleted/);
   });
 
   it('refuses a draw step that removes or reorders earlier pages (old pages must stay a prefix)', async () => {

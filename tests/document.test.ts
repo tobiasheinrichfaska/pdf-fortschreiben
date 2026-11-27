@@ -112,6 +112,22 @@ describe('writeUpdate', () => {
     expect(lastTrailer(out)).toContain('/Info 1 0 R');
     expect(lastTrailer(out)).toContain('/Foo /Bar');
   });
+
+  it('carries over every other key of the previous trailer (ISO 32000-1 7.5.6); trailerExtra wins', async () => {
+    const file = new PdfFile(await base());
+    const u = new Update(file);
+    u.add(dict({ A: 1 }));
+    const once = writeUpdate(file, u, { Foo: name('Bar'), Keep: 7 }).bytes;
+    const second = new PdfFile(once);
+    const u2 = new Update(second);
+    u2.add(dict({ B: 2 }));
+    const twice = writeUpdate(second, u2, { Keep: 8 }).bytes;
+    const t = new PdfFile(twice).trailer.entries;
+    expect(t.get('Foo')).toEqual(name('Bar'));
+    expect(t.get('Keep')).toBe(8);
+    expect(t.get('Info')).toEqual(file.trailer.entries.get('Info'));
+    expect(t.get('Prev')).toBe(second.revisions[1]!.xrefAt);
+  });
 });
 
 describe('numbers', () => {
@@ -260,9 +276,11 @@ describe('page tree depth', () => {
       u.set(f.rootRef, cat);
     });
 
-  it('follows a chain within the limit and ignores one of 40 levels', async () => {
+  it('follows a chain within the limit and refuses one of 40 levels (no page is lost silently)', async () => {
     expect(new PdfFile(await nested(20)).pages()).toHaveLength(1);
-    expect(new PdfFile(await nested(40)).pages()).toHaveLength(0);
+    const deep = new PdfFile(await nested(40));
+    expect(() => deep.pages()).toThrow(PdfReadError);
+    expect(() => deep.pages()).toThrow(/deeper than 32/);
   });
 });
 

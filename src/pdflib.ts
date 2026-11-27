@@ -133,6 +133,10 @@ export async function prepareDrawnPages(pdf: Uint8Array, draw: Draw): Promise<Dr
     if (!isPagesNode(o)) throw new PdfLibError('changed-object', `object ${r.objectNumber}`);
     update.set(ref(r.objectNumber), raw(now));
   }
+  // An earlier object pdf-lib dropped (context.delete) would silently stay in the file: refuse it.
+  const after = new Set(all.map(([r]) => r.objectNumber));
+  for (const num of before.keys())
+    if (!after.has(num)) throw new PdfLibError('changed-object', `object ${num} deleted`);
   if (update.size !== Math.max(oldSize, context.largestObjectNumber + 1))
     throw new PdfLibError('numbering', `pdf-lib counter ${context.largestObjectNumber}`);
 
