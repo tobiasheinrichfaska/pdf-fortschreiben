@@ -10,6 +10,7 @@ import {
   attachFile,
   findDocTimeStamps,
   type PdfFile,
+  type Result,
   type Update,
 } from '../src/index.ts';
 
@@ -20,6 +21,11 @@ mkdirSync(tmp, { recursive: true });
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
 const te = new TextEncoder();
 let n = 0;
+
+const need = <T>(r: Result<T>): T => {
+  if (!r.ok) throw new Error(`${r.code}: ${r.detail}`);
+  return r.value;
+};
 
 const stamper = async (digest: Uint8Array): Promise<Uint8Array> => {
   n++;
@@ -60,20 +66,20 @@ const att = (s: string, mod: string, day: number) => (f: PdfFile, u: Update) =>
     modified: mod,
     relationship: 'Data',
   });
-pdf = appendRevision(pdf, att('{"tag":1}', 'D:20261101180000Z', 1));
-pdf = await appendDocTimeStamp(pdf, stamper);
-pdf = appendRevision(pdf, att('{"tag":2}', 'D:20261102180000Z', 2));
-pdf = await appendDocTimeStamp(pdf, stamper);
+pdf = need(appendRevision(pdf, att('{"tag":1}', 'D:20261101180000Z', 1)));
+pdf = need(await appendDocTimeStamp(pdf, stamper));
+pdf = need(appendRevision(pdf, att('{"tag":2}', 'D:20261102180000Z', 2)));
+pdf = need(await appendDocTimeStamp(pdf, stamper));
 writeFileSync(resolve(tmp, 'monat.pdf'), pdf);
 
 // Control for pyHanko's modification analysis: attach, stamp, stamp again with NO attachment change.
 let ctl: Uint8Array = await doc.save({ useObjectStreams: false });
-ctl = appendRevision(ctl, att('{"tag":1}', 'D:20261101180000Z', 1));
-ctl = await appendDocTimeStamp(ctl, stamper);
-ctl = await appendDocTimeStamp(ctl, stamper);
+ctl = need(appendRevision(ctl, att('{"tag":1}', 'D:20261101180000Z', 1)));
+ctl = need(await appendDocTimeStamp(ctl, stamper));
+ctl = need(await appendDocTimeStamp(ctl, stamper));
 writeFileSync(resolve(tmp, 'kontrolle.pdf'), ctl);
 
-const found = findDocTimeStamps(pdf);
+const found = need(findDocTimeStamps(pdf));
 console.log(`stamps found: ${found.length}`);
 let fail = 0;
 found.forEach((f, i) => {

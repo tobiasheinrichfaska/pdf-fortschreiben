@@ -3,7 +3,7 @@
  * modelled: numbers, booleans, null, names, literal and hex strings, arrays, dictionaries, references,
  * streams, and `raw` text (fixed-width placeholders whose byte offsets the writer reports).
  */
-import { PdfReadError } from './errors.ts';
+import { PdfError } from './errors.ts';
 
 export interface PdfName {
   readonly t: 'name';
@@ -60,7 +60,7 @@ export function latin1(text: string): PdfString {
   const bytes = new Uint8Array(text.length);
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    if (c > 0xff) throw new Error(`latin1: character outside Latin-1 at ${i}`);
+    if (c > 0xff) throw new PdfError('bad-object', `latin1: character outside Latin-1 at ${i}`);
     bytes[i] = c;
   }
   return { t: 'str', bytes };
@@ -87,8 +87,7 @@ export function decodeText(bytes: Uint8Array): string {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
     return new TextDecoder('utf-8').decode(bytes.subarray(3));
   if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-    if (bytes.length % 2 !== 0)
-      throw new PdfReadError('syntax', 'name tree key: odd UTF-16 length');
+    if (bytes.length % 2 !== 0) throw new PdfError('syntax', 'name tree key: odd UTF-16 length');
     let out = '';
     for (let i = 2; i < bytes.length; i += 2)
       out += String.fromCharCode((bytes[i]! << 8) | bytes[i + 1]!);
@@ -131,9 +130,10 @@ function nameText(v: string): string {
 }
 
 function numberText(n: number): string {
-  if (!Number.isFinite(n)) throw new Error('number: not finite');
+  if (!Number.isFinite(n)) throw new PdfError('bad-object', 'number: not finite');
   if (Number.isInteger(n)) {
-    if (!Number.isSafeInteger(n)) throw new Error('number: integer beyond the safe range');
+    if (!Number.isSafeInteger(n))
+      throw new PdfError('bad-object', 'number: integer beyond the safe range');
     return Object.is(n, -0) ? '0' : String(n);
   }
   // Fractions are below 2^53 here, so toFixed never switches to exponent notation.
@@ -199,7 +199,10 @@ export class TextSink {
       return this.push(']');
     }
     if ((o as { t: string }).t === 'stream')
-      throw new Error(`write: a stream is only valid as a top-level indirect object${at(path)}`);
+      throw new PdfError(
+        'bad-object',
+        `write: a stream is only valid as a top-level indirect object${at(path)}`,
+      );
     switch (o.t) {
       case 'name':
         return this.push(nameText(o.v));
@@ -212,7 +215,7 @@ export class TextSink {
       case 'raw':
         for (let i = 0; i < o.text.length; i++)
           if (o.text.charCodeAt(i) > 0xff)
-            throw new Error(`raw: character outside Latin-1 at ${i}${at(path)}`);
+            throw new PdfError('bad-object', `raw: character outside Latin-1 at ${i}${at(path)}`);
         if (o.id !== undefined) this.marks.set(o.id, this.length);
         return this.push(o.text);
       case 'dict': {
@@ -225,7 +228,7 @@ export class TextSink {
         return this.push('>>');
       }
       default:
-        throw new Error(`write: unknown object ${JSON.stringify(o)}${at(path)}`);
+        throw new PdfError('bad-object', `write: unknown object ${JSON.stringify(o)}${at(path)}`);
     }
   }
 
@@ -236,7 +239,8 @@ export class TextSink {
       if (typeof part === 'string') {
         for (let i = 0; i < part.length; i++) {
           const c = part.charCodeAt(i);
-          if (c > 0xff) throw new Error(`bytes: character outside Latin-1 at ${pos - at}`);
+          if (c > 0xff)
+            throw new PdfError('bad-object', `bytes: character outside Latin-1 at ${pos - at}`);
           out[pos++] = c;
         }
       } else {

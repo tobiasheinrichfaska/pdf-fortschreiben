@@ -5,6 +5,7 @@
  * from a function the caller passes in (the library has no network and no trust store).
  */
 import { PdfFile, Update, writeUpdate } from './document.ts';
+import { PdfError, guard, guardAsync, unwrap, type Result } from './errors.ts';
 import {
   decodeText,
   dict,
@@ -18,7 +19,7 @@ import {
   type PdfDict,
   type PdfObject,
 } from './objects.ts';
-import { PdfReadError, latin1Text } from './parse.ts';
+import { latin1Text } from './parse.ts';
 import { Sha256, toHex } from './sha256.ts';
 
 /** Gets a DER TimeStampToken (CMS ContentInfo) for a SHA-256 digest, e.g. through a relay. */
@@ -90,19 +91,27 @@ export function rangeDigest(bytes: Uint8Array, range: readonly number[]): Uint8A
  * Appends one revision with a document time stamp over everything before it (and over the new revision
  * itself except the token). Returns the new file.
  */
-export async function appendDocTimeStamp(
+export function appendDocTimeStamp(
   pdf: Uint8Array,
   stamp: Stamper,
   options: StampOptions = {},
+): Promise<Result<Uint8Array>> {
+  return guardAsync(() => appendStamped(pdf, stamp, options));
+}
+
+async function appendStamped(
+  pdf: Uint8Array,
+  stamp: Stamper,
+  options: StampOptions,
 ): Promise<Uint8Array> {
   const reserve = options.reserve ?? 16384;
   if (!Number.isInteger(reserve) || reserve < 1024 || reserve > 65536)
-    throw new RangeError('reserve must be 1024..65536');
-  const file = new PdfFile(pdf);
+    throw new PdfError('bad-options', 'reserve must be 1024..65536');
+  const file = unwrap(PdfFile.open(pdf));
   const u = new Update(file);
   const pages = file.pages();
   const pageRef = pages[options.page ?? 0];
-  if (pageRef === undefined) throw new RangeError('no such page');
+  if (pageRef === undefined) throw new PdfError('no-page', 'no such page');
 
   const catalog = clone(dictOf(u, file.rootRef)!);
   const form = clone(dictOf(u, catalog.entries.get('AcroForm')) ?? dict({}));
@@ -145,21 +154,29 @@ export async function appendDocTimeStamp(
   catalog.entries.set('AcroForm', form);
   u.set(file.rootRef, catalog);
 
-  const { bytes, marks } = writeUpdate(file, u);
+  const { bytes, marks } = unwrap(writeUpdate(file, u));
   const start = marks.get('contents')!;
   const end = start + reserve * 2 + 2;
   const range = [0, start, end, bytes.length - end];
   const rangeText = `[${range.join(' ')}]`.padEnd(BYTE_RANGE_WIDTH, ' ');
-  if (rangeText.length !== BYTE_RANGE_WIDTH) throw new RangeError('file too large for /ByteRange');
+  if (rangeText.length !== BYTE_RANGE_WIDTH)
+    throw new PdfError('file-too-large', 'file too large for /ByteRange');
   const brAt = marks.get('byterange')!;
   for (let i = 0; i < rangeText.length; i++) bytes[brAt + i] = rangeText.charCodeAt(i);
 
-  const token = await stamp(rangeDigest(bytes, range));
-  if (!isDerSequence(token) || derLength(token) !== token.length)
-    throw new Error(
+  let token: Uint8Array;
+  try {
+    token = await stamp(rangeDigest(bytes, range));
+  } catch (e) {
+    throw new PdfError('stamper-failed', e instanceof Error ? e.message : String(e));
+  }
+  if (!(token instanceof Uint8Array) || !isDerSequence(token) || derLength(token) !== token.length)
+    throw new PdfError(
+      'bad-token',
       'stamp: answer is not one DER SEQUENCE (DER is required, BER indefinite length is not accepted)',
     );
-  if (token.length > reserve) throw new RangeError(`token (${token.length} B) exceeds reserve`);
+  if (token.length > reserve)
+    throw new PdfError('token-too-large', `token (${token.length} B) exceeds reserve`);
   const tokenHex = toHex(token).toUpperCase();
   for (let i = 0; i < tokenHex.length; i++) bytes[start + 1 + i] = tokenHex.charCodeAt(i);
   return bytes;
@@ -195,14 +212,18 @@ export interface FoundTimeStamp {
  * checking each token (signature, chain, imprint = digest) is up to the caller's verifier. A malformed
  * stamp dictionary yields an entry with `rangeOk: false` and an `error`, it does not abort the listing.
  */
-export function findDocTimeStamps(pdf: Uint8Array): FoundTimeStamp[] {
-  const file = new PdfFile(pdf);
+export function findDocTimeStamps(pdf: Uint8Array): Result<FoundTimeStamp[]> {
+  return guard(() => findAll(pdf));
+}
+
+function findAll(pdf: Uint8Array): FoundTimeStamp[] {
+  const file = unwrap(PdfFile.open(pdf));
   const found = new Map<string, FoundTimeStamp>();
   for (let i = 0; i < file.revisions.length; i++) {
     let view: PdfFile;
     let fields: PdfObject | undefined;
     try {
-      view = new PdfFile(file.revisionBytes(i));
+      view = unwrap(PdfFile.open(file.revisionBytes(i)));
       const form = view.dict(view.catalog.entries.get('AcroForm'));
       fields = view.resolve(form?.entries.get('Fields')) as PdfObject | undefined;
     } catch {
@@ -319,7 +340,7 @@ function describe(file: PdfFile, num: number, v: PdfDict, field: string): FoundT
     Array.isArray(contents) ||
     contents.t !== 'hex'
   )
-    throw new PdfReadError('syntax', `time stamp ${num}: /ByteRange or /Contents malformed`);
+    throw new PdfError('syntax', `time stamp ${num}: /ByteRange or /Contents malformed`);
   const range = br as number[];
   const [, b, c, d] = range as [number, number, number, number];
   const bytes = file.bytes;
