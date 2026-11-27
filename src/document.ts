@@ -6,7 +6,9 @@
  */
 import {
   TextSink,
+  hex,
   isDict,
+  isName,
   isRef,
   ref,
   type PdfDict,
@@ -16,13 +18,18 @@ import {
 } from './objects.ts';
 import {
   PdfReadError,
-  indexOf,
   isStream,
+  latin1Text,
   lastStartxref,
   readIndirect,
+  readRevisionEnd,
   readXrefSection,
   type XrefSection,
 } from './parse.ts';
+import { Sha256 } from './sha256.ts';
+
+/** The largest `/Size` a file may have (what `PdfFile` accepts and `writeUpdate` may write). */
+export const MAX_SIZE = 2147483647;
 
 export interface Revision {
   /** Offset of this revision's `xref` keyword. */
@@ -32,12 +39,22 @@ export interface Revision {
   readonly trailer: PdfDict;
 }
 
+/** True when the first indirect object after the header is a `/Linearized` dictionary. */
+function hasLinearizedDict(bytes: Uint8Array): boolean {
+  const head = latin1Text(bytes, 0, Math.min(bytes.length, 1024));
+  return /^%PDF-[^\r\n]*(?:[\r\n]+%[^\r\n]*)*[\r\n\s]*\d+\s+\d+\s+obj\s*<<(?:(?!endobj)[^])*?\/Linearized\b/.test(
+    head,
+  );
+}
+
 export class PdfFile {
   readonly bytes: Uint8Array;
   /** Revisions, oldest first. */
   readonly revisions: readonly Revision[];
   private readonly table = new Map<number, { offset: number; gen: number }>();
+  private readonly freed = new Map<number, number>();
   private readonly cache = new Map<number, PdfObject | PdfStream>();
+  private readonly reading = new Set<number>();
 
   constructor(bytes: Uint8Array) {
     this.bytes = bytes;
@@ -53,15 +70,42 @@ export class PdfFile {
       at = typeof prev === 'number' ? prev : null;
     }
     sections.reverse();
+    for (const s of sections) {
+      const size = s.trailer.entries.get('Size');
+      if (typeof size === 'number' && (!Number.isInteger(size) || size < 0 || size > MAX_SIZE))
+        throw new PdfReadError('syntax', `trailer /Size ${size} is not a valid object count`);
+    }
+    for (const s of sections)
+      if (s.trailer.entries.has('Encrypt'))
+        throw new PdfReadError('encrypted', 'the trailer has /Encrypt');
     this.revisions = sections.map((s) => ({
       xrefAt: s.at,
-      end: revisionEnd(bytes, s.at),
+      end: readRevisionEnd(bytes, s.trailerEnd),
       trailer: s.trailer,
     }));
+    // Revisions must be appended one after the other. A linearized file is not (first-page section at the
+    // start); the loop below refuses any revision that does not lie after its predecessor, whatever the cause.
+    if (hasLinearizedDict(bytes))
+      throw new PdfReadError('linearized', 'the first object is a /Linearized dictionary');
+    for (let i = 1; i < this.revisions.length; i++)
+      if (
+        this.revisions[i]!.end <= this.revisions[i - 1]!.end ||
+        this.revisions[i]!.xrefAt <= this.revisions[i - 1]!.xrefAt
+      )
+        throw new PdfReadError(
+          'linearized',
+          `revision ${i} (xref ${this.revisions[i]!.xrefAt}) does not lie after revision ${i - 1}`,
+        );
     for (const s of sections)
       for (const [num, e] of s.entries) {
-        if (e.inUse) this.table.set(num, { offset: e.offset, gen: e.gen });
-        else this.table.delete(num);
+        if (e.inUse) {
+          this.table.set(num, { offset: e.offset, gen: e.gen });
+          this.freed.delete(num);
+        } else {
+          this.table.delete(num);
+          // The generation of a free entry is the one a reuse of the number must carry.
+          if (num !== 0) this.freed.set(num, e.gen);
+        }
       }
   }
 
@@ -78,17 +122,44 @@ export class PdfFile {
     return max;
   }
 
+  /**
+   * The generation of an object in use, or of a freed one (the generation a reuse must carry), or
+   * `undefined` when the file has no such object. Object 0 is never reported.
+   */
+  generation(num: number): number | undefined {
+    return this.table.get(num)?.gen ?? this.freed.get(num);
+  }
+
   /** The object a reference points to (in the newest revision). */
   object(r: PdfRef): PdfObject | PdfStream {
-    const hit = this.cache.get(r.num);
-    if (hit !== undefined) return hit;
     const e = this.table.get(r.num);
     if (e === undefined) throw new PdfReadError('object-missing', `object ${r.num}`);
-    const o = readIndirect(this.bytes, e.offset, r.num, (len) => {
-      const v = isRef(len) ? this.object(len) : len;
-      if (typeof v !== 'number') throw new PdfReadError('syntax', `stream length of ${r.num}`);
-      return v;
-    });
+    if (e.gen !== r.gen)
+      throw new PdfReadError(
+        'object-mismatch',
+        `object ${r.num}: generation ${r.gen} referenced, the file has ${e.gen}`,
+      );
+    const hit = this.cache.get(r.num);
+    if (hit !== undefined) return hit;
+    if (this.reading.has(r.num))
+      throw new PdfReadError('syntax', `object ${r.num} refers to itself (stream /Length cycle)`);
+    this.reading.add(r.num);
+    let o: PdfObject | PdfStream;
+    try {
+      o = readIndirect(
+        this.bytes,
+        e.offset,
+        r.num,
+        (len) => {
+          const v = isRef(len) ? this.object(len) : len;
+          if (typeof v !== 'number') throw new PdfReadError('syntax', `stream length of ${r.num}`);
+          return v;
+        },
+        e.gen,
+      );
+    } finally {
+      this.reading.delete(r.num);
+    }
     this.cache.set(r.num, o);
     return o;
   }
@@ -115,39 +186,68 @@ export class PdfFile {
     return c;
   }
 
-  /** The page objects in order (follows `/Kids` from the catalog's `/Pages`). */
+  /**
+   * The page objects in order (follows `/Kids` from the catalog's `/Pages`; a node reached twice is walked
+   * once; a tree deeper than 32 levels is refused with `PdfReadError('syntax')`, never cut silently).
+   */
   pages(): PdfRef[] {
     const out: PdfRef[] = [];
+    const seen = new Set<number>();
     const walk = (r: PdfObject | undefined, depth: number): void => {
-      if (!isRef(r) || depth > 32) return;
+      if (!isRef(r) || seen.has(r.num)) return;
+      if (depth > 32)
+        throw new PdfReadError('syntax', `page tree deeper than 32 levels at ${r.num}`);
+      seen.add(r.num);
       const d = this.dict(r);
       if (d === undefined) return;
-      const kids = d.entries.get('Kids');
+      const kids = this.resolve(d.entries.get('Kids'));
       if (Array.isArray(kids)) kids.forEach((k) => walk(k, depth + 1));
-      else out.push(r);
+      else {
+        const type = d.entries.get('Type');
+        if (isName(type, 'Pages'))
+          throw new PdfReadError(
+            'syntax',
+            `page tree node ${r.num} is a /Pages node without /Kids array`,
+          );
+        out.push(r);
+      }
     };
     walk(this.catalog.entries.get('Pages'), 0);
     return out;
   }
 
-  /** This file as it stood at the end of revision `index` (a prefix of the bytes). */
+  /**
+   * This file as it stood at the end of revision `index` (a prefix of the bytes): up to and including the
+   * single line end after `%%EOF` (which a time stamp's `/ByteRange` covers), if there is one. It is a prefix
+   * of the updated file, not necessarily byte-equal to the original base: it includes that line end, which
+   * may be the writer's own lead newline of the next revision.
+   */
   revisionBytes(index: number): Uint8Array {
     const r = this.revisions[index];
     if (r === undefined) throw new RangeError(`no revision ${index}`);
-    return this.bytes.subarray(0, r.end);
+    let end = r.end;
+    if (this.bytes[end] === 0x0d && this.bytes[end + 1] === 0x0a) end += 2;
+    else if (this.bytes[end] === 0x0a || this.bytes[end] === 0x0d) end += 1;
+    return this.bytes.subarray(0, end);
   }
-}
-
-function revisionEnd(bytes: Uint8Array, xrefAt: number): number {
-  const eof = indexOf(bytes, '%%EOF', xrefAt);
-  return eof < 0 ? bytes.length : eof + 5;
 }
 
 /** The objects of one new revision. */
 export class Update {
   private readonly file: PdfFile;
   private next: number;
-  readonly objects = new Map<number, PdfObject | PdfStream>();
+  private readonly objs = new Map<number, PdfObject | PdfStream>();
+  private readonly gens = new Map<number, number>();
+
+  /** The objects of this update (a read only copy). */
+  get objects(): ReadonlyMap<number, PdfObject | PdfStream> {
+    return new Map(this.objs);
+  }
+
+  /** Generation written for each object (that of the file's xref entry; 0 for new objects). */
+  get generations(): ReadonlyMap<number, number> {
+    return new Map(this.gens);
+  }
 
   constructor(file: PdfFile) {
     this.file = file;
@@ -156,26 +256,42 @@ export class Update {
 
   /** Adds a new object and returns its reference. */
   add(o: PdfObject | PdfStream): PdfRef {
+    if (this.next + 1 > MAX_SIZE)
+      throw new Error(
+        `Update.add: /Size would exceed ${MAX_SIZE} (the file has ${this.file.size})`,
+      );
     const r = ref(this.next++);
-    this.objects.set(r.num, o);
+    this.objs.set(r.num, o);
+    this.gens.set(r.num, 0);
     return r;
   }
 
   /** Replaces an existing object in the new revision. */
   set(r: PdfRef, o: PdfObject | PdfStream): void {
-    if (r.gen !== 0) throw new Error('only generation 0 is written');
-    this.objects.set(r.num, o);
+    const gen = this.file.generation(r.num) ?? 0;
+    if (r.num === 0) throw new Error('object 0 cannot be set');
+    if (r.gen !== gen)
+      throw new Error(`object ${r.num}: generation ${r.gen} given, the file has ${gen}`);
+    if (r.num + 1 > MAX_SIZE)
+      throw new Error(`Update.set: object ${r.num} would make /Size exceed ${MAX_SIZE}`);
+    this.objs.set(r.num, o);
+    this.gens.set(r.num, gen);
+    if (r.num >= this.next) this.next = r.num + 1;
   }
 
   /** The object as this update sees it: changed here, or else from the file. */
   get(r: PdfRef): PdfObject | PdfStream {
-    return this.objects.get(r.num) ?? this.file.object(r);
+    return this.objs.has(r.num) ? this.objs.get(r.num)! : this.file.object(r);
   }
 
   get size(): number {
     return this.next;
   }
 }
+
+const RESERVED_TRAILER = ['Size', 'Prev', 'Root', 'ID', 'Encrypt'];
+/** Keys of the previous trailer that `writeUpdate` sets itself (everything else is carried over). */
+const OWN_TRAILER = new Set(['Size', 'Prev', 'Root', 'ID', 'Info']);
 
 export interface Written {
   readonly bytes: Uint8Array;
@@ -184,36 +300,51 @@ export interface Written {
 }
 
 /**
- * Appends the update as a new revision. `trailerExtra` may set `/Info`; `/Root`, `/ID` are carried over,
- * `/Size` and `/Prev` are set here.
+ * Appends the update as a new revision. `trailerExtra` may set `/Info` and other keys; `/Root`, `/Info` and
+ * every other key of the previous trailer are carried over (ISO 32000-1 7.5.6; `trailerExtra` wins), `/ID` is kept in its first element and gets a new second one (ISO 32000-1 14.4; a missing `/ID` is
+ * created with both elements equal), `/Size` and `/Prev` are set here, and `/Size`, `/Prev`, `/Root`, `/ID`, `/Encrypt` in
+ * `trailerExtra` are refused with an Error. An update without objects is refused.
  */
 export function writeUpdate(
   file: PdfFile,
   update: Update,
   trailerExtra: Record<string, PdfObject> = {},
 ): Written {
+  // The getters return fresh copies: read each once, not per object.
+  const objects = update.objects;
+  const generations = update.generations;
+  if (objects.size === 0) throw new Error('writeUpdate: the update has no objects');
+  for (const key of RESERVED_TRAILER)
+    if (key in trailerExtra) throw new Error(`writeUpdate: trailerExtra must not set /${key}`);
   const base = file.bytes;
   const sink = new TextSink();
   const offsets = new Map<number, number>();
   // A new revision starts on a new line.
   const lead = base.length > 0 && base[base.length - 1] !== 0x0a ? '\n' : '';
   sink.push(lead);
-  const nums = [...update.objects.keys()].sort((a, b) => a - b);
+  const nums = [...objects.keys()].sort((a, b) => a - b);
   for (const num of nums) {
-    const o = update.objects.get(num)!;
+    const o = objects.get(num)!;
     offsets.set(num, base.length + sink.size);
-    sink.push(`${num} 0 obj\n`);
+    sink.push(`${num} ${generations.get(num) ?? 0} obj\n`);
     if (isStream(o)) {
       const d = { t: 'dict' as const, entries: new Map(o.dict.entries) };
       d.entries.set('Length', o.data.length);
-      sink.write(d);
+      try {
+        sink.write(d);
+      } catch (e) {
+        throw new Error(`writeUpdate: object ${num}: ${(e as Error).message}`, { cause: e });
+      }
       sink.push('\nstream\n');
-      // Stream data is binary: written as Latin-1 characters, byte for byte.
-      let chunk = '';
-      for (const c of o.data) chunk += String.fromCharCode(c);
-      sink.push(chunk);
+      // Stream data is binary: appended as it is.
+      sink.pushBytes(o.data);
       sink.push('\nendstream');
-    } else sink.write(o);
+    } else
+      try {
+        sink.write(o);
+      } catch (e) {
+        throw new Error(`writeUpdate: object ${num}: ${(e as Error).message}`, { cause: e });
+      }
     sink.push('\nendobj\n');
   }
   const xrefAt = base.length + sink.size;
@@ -225,26 +356,50 @@ export function writeUpdate(
     while (j + 1 < nums.length && nums[j + 1] === nums[j]! + 1) j++;
     sink.push(`${nums[i]} ${j - i + 1}\n`);
     for (let k = i; k <= j; k++)
-      sink.push(`${String(offsets.get(nums[k]!)).padStart(10, '0')} 00000 n\r\n`);
+      sink.push(
+        `${String(offsets.get(nums[k]!)).padStart(10, '0')} ${String(generations.get(nums[k]!) ?? 0).padStart(5, '0')} n\r\n`,
+      );
     i = j + 1;
   }
   const prevAt = file.revisions[file.revisions.length - 1]!.xrefAt;
   const trailer = new Map<string, PdfObject>();
-  trailer.set('Size', update.size);
+  const size = Math.max(update.size, (nums[nums.length - 1] ?? 0) + 1);
+  if (size > MAX_SIZE) throw new Error(`writeUpdate: /Size ${size} exceeds ${MAX_SIZE}`);
+  trailer.set('Size', size);
   trailer.set('Root', file.rootRef);
   const info = trailerExtra['Info'] ?? file.trailer.entries.get('Info');
   if (info !== undefined) trailer.set('Info', info);
-  const id = file.trailer.entries.get('ID');
-  if (id !== undefined) trailer.set('ID', id);
+  // The second element: first 16 bytes of SHA-256 over the old file and this revision's objects (the
+  // trailer is left out). Deterministic: no clock, no randomness.
+  const second = new Sha256().update(base).update(sink.bytes()).digest().subarray(0, 16);
+  const oldId = file.trailer.entries.get('ID');
+  let first: Uint8Array = second;
+  if (oldId !== undefined) {
+    const a = oldId as PdfObject;
+    const ok =
+      Array.isArray(a) &&
+      a.length === 2 &&
+      a.every(
+        (e) =>
+          e !== null &&
+          typeof e === 'object' &&
+          !Array.isArray(e) &&
+          (e.t === 'str' || e.t === 'hex'),
+      );
+    if (!ok) throw new PdfReadError('syntax', 'trailer /ID is not an array of two strings');
+    first = ((a as PdfObject[])[0] as { bytes: Uint8Array }).bytes;
+  }
+  trailer.set('ID', [hex(first), hex(second)]);
   trailer.set('Prev', prevAt);
+  // ISO 32000-1 7.5.6: the added trailer holds every entry of the previous one (except /Prev).
+  for (const [k, v] of file.trailer.entries) if (!OWN_TRAILER.has(k)) trailer.set(k, v);
   for (const [k, v] of Object.entries(trailerExtra)) if (k !== 'Info') trailer.set(k, v);
   sink.push('trailer\n');
   sink.write({ t: 'dict', entries: trailer });
   sink.push(`\nstartxref\n${xrefAt}\n%%EOF\n`);
-  const tail = sink.bytes();
-  const out = new Uint8Array(base.length + tail.length);
+  const out = new Uint8Array(base.length + sink.size);
   out.set(base, 0);
-  out.set(tail, base.length);
+  sink.writeTo(out, base.length);
   const marks = new Map<string, number>();
   for (const [k, v] of sink.marks) marks.set(k, base.length + v);
   return { bytes: out, marks };

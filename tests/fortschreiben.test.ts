@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
 import {
   PdfFile,
+  type PdfRef,
   PdfReadError,
   appendDocTimeStamp,
   appendRevision,
@@ -14,7 +15,7 @@ import {
   readAttachments,
   sha256Bytes,
 } from '../src/index.ts';
-import { Lexer } from '../src/parse.ts';
+import { Lexer, readXrefSection } from '../src/parse.ts';
 import { TextSink } from '../src/objects.ts';
 import { ascii, basePdf, fakeStamper, text } from './helpers.ts';
 
@@ -46,6 +47,26 @@ describe('revisions', () => {
     expect(f.pages()).toHaveLength(2);
   });
 
+  it('walks a cyclic or shared /Kids graph once per node', async () => {
+    const base = await basePdf(1);
+    const pagesRef = new PdfFile(base).catalog.entries.get('Pages') as PdfRef;
+    const cyc = appendRevision(base, (_f, u) => {
+      u.set(pagesRef, dict({ Type: name('Pages'), Kids: [pagesRef, pagesRef], Count: 0 }));
+    });
+    expect(new PdfFile(cyc).pages()).toEqual([]);
+    // a chain of 30 nodes (below the depth limit of 32), each listing the next one twice, ends in one
+    // page; without the visited set this would walk 2^30 paths
+    const chain = appendRevision(base, (f, u) => {
+      const page = f.pages()[0]!;
+      let next: PdfRef = page;
+      for (let i = 0; i < 30; i++) {
+        next = u.add(dict({ Type: name('Pages'), Kids: [next, next], Count: 1 }));
+      }
+      u.set(pagesRef, dict({ Type: name('Pages'), Kids: [next], Count: 1 }));
+    });
+    expect(new PdfFile(chain).pages()).toHaveLength(1);
+  });
+
   it('refuses cross-reference streams', async () => {
     const pdf = await basePdf(1, true);
     expect(() => new PdfFile(pdf)).toThrow(PdfReadError);
@@ -60,7 +81,8 @@ describe('revisions', () => {
     const f = new PdfFile(next);
     expect(f.revisions).toHaveLength(2);
     expect(f.revisions[0]!.end).toBe(base.length);
-    expect(ascii(f.revisionBytes(0))).toBe(ascii(base));
+    // plus the single line end after %%EOF (the writer's lead), which a stamp's /ByteRange covers
+    expect(ascii(f.revisionBytes(0))).toBe(ascii(base) + '\n');
     const loaded = await PDFDocument.load(next);
     expect(loaded.getPageCount()).toBe(1);
   });
@@ -145,7 +167,7 @@ describe('document time stamps', () => {
     ]);
     found.forEach((t, i) => {
       expect(t.digest).toEqual(seen[i]);
-      expect(t.token).toEqual(Uint8Array.from([0x04, 32, ...seen[i]!]));
+      expect(t.token).toEqual(Uint8Array.from([0x30, 32, ...seen[i]!]));
       expect(t.byteRange[2]! + t.byteRange[3]!).toBe(
         new PdfFile(s2).revisions[t.revision!]!.end + 1,
       );
@@ -167,14 +189,29 @@ describe('document time stamps', () => {
     await expect(
       appendDocTimeStamp(
         base,
-        async () => Uint8Array.from([0x04, 0x82, 0x08, 0x00, ...new Uint8Array(2048)]),
+        async () => Uint8Array.from([0x30, 0x82, 0x08, 0x00, ...new Uint8Array(2048)]),
         {
           reserve: 2048,
         },
       ),
     ).rejects.toThrow(RangeError);
     await expect(
-      appendDocTimeStamp(base, async () => Uint8Array.from([0x04, 0x05, 1]), { reserve: 2048 }),
+      appendDocTimeStamp(base, async () => Uint8Array.from([0x30, 0x05, 1]), { reserve: 2048 }),
     ).rejects.toThrow('DER');
+  });
+});
+
+describe('xref reader hardening', () => {
+  const read = (s: string) => readXrefSection(new TextEncoder().encode(s), 0);
+  it('refuses a truncated xref table instead of looping', () => {
+    expect(() => read('xref\n0 1\n0000000000 65535 f \n')).toThrow(PdfReadError);
+  });
+  it('refuses a delimiter where a subsection header is expected', () => {
+    expect(() => read('xref\n0 1\n0000000000 65535 f \n<< >>')).toThrow(PdfReadError);
+    expect(() => read('xref\n0 1\n0000000000 65535 f \n)')).toThrow(PdfReadError);
+  });
+  it('refuses non-decimal subsection numbers', () => {
+    expect(() => read('xref\n1e3 1\n0000000000 65535 f \ntrailer\n<< >>')).toThrow(PdfReadError);
+    expect(() => read('xref\n0x10 1\n0000000000 65535 f \ntrailer\n<< >>')).toThrow(PdfReadError);
   });
 });

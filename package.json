@@ -1,25 +1,51 @@
 {
   "name": "pdf-fortschreiben",
   "private": true,
-  "version": "0.0.1",
-  "description": "Append revisions to a PDF without rewriting it: associated files (PDF/A-3) and document time stamps (RFC 3161, PAdES ETSI.RFC3161), and read them back. No network, no dependencies.",
+  "version": "0.1.0",
+  "description": "Append revisions to a PDF without rewriting it: associated files (PDF/A-3) and document time stamps (RFC 3161, PAdES ETSI.RFC3161), and read them back. No network, no dependencies (pdf-lib only for the optional `pdflib` entry).",
   "license": "AGPL-3.0-only",
   "author": "Tobias Heinrich",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./pdflib": {
+      "types": "./dist/pdflib.d.ts",
+      "import": "./dist/pdflib.js"
+    }
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "LICENSE_COMMERCIAL.md",
+    "CONTRIBUTING.md"
+  ],
   "scripts": {
     "test": "vitest run",
     "extern": "bash scripts/pki.sh && node scripts/extern-pruefen.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/fix-declarations.mjs",
+    "prepare": "node scripts/prepare.mjs"
+  },
+  "peerDependencies": {
+    "pdf-lib": "1.17.1"
+  },
+  "peerDependenciesMeta": {
+    "pdf-lib": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

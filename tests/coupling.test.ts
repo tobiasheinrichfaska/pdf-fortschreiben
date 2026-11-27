@@ -27,7 +27,9 @@ describe('library core', () => {
         (m) => m[1]!,
       );
       for (const spec of imports) {
-        expect(spec.startsWith('./'), `${spec} must be a sibling file`).toBe(true);
+        // only the separate entry `pdflib` may use pdf-lib (optional peer, see package.json)
+        const allowed = spec.startsWith('./') || (file.endsWith('pdflib.ts') && spec === 'pdf-lib');
+        expect(allowed, `${spec} must be a sibling file`).toBe(true);
       }
       expect(text).not.toMatch(/\bBuffer\b(?!Source)|\bprocess\.|\brequire\(/);
       expect(text).not.toMatch(/\bfetch\s*\(/);
@@ -51,6 +53,9 @@ const FORBIDDEN = [
   ['frage', 'bogen'],
 ].map((parts) => parts.join(''));
 
+/** The public owner account (repository URLs) is no private name, although it contains one. */
+const withoutOwner = (text: string): string => text.replaceAll('tobiasheinrichfaska', '');
+
 /** Short words only count as whole words, so they do not hit inside other words or hashes. */
 const mentions = (text: string, word: string): boolean =>
   word.length <= 3 ? new RegExp(String.raw`\b${word}\b`).test(text) : text.includes(word);
@@ -61,7 +66,7 @@ describe('no private names', () => {
     for (const file of files(ROOT)) {
       const skipped = /\.(pem|crt|tsr|tsq)$/.test(file) || file.endsWith('LICENSE_COMMERCIAL.md');
       if (file === SELF || skipped) continue;
-      const text = readFileSync(file, 'utf8').toLowerCase();
+      const text = withoutOwner(readFileSync(file, 'utf8').toLowerCase());
       for (const word of FORBIDDEN) {
         expect(mentions(text, word), `${relative(ROOT, file)}: ${word}`).toBe(false);
       }
@@ -78,8 +83,9 @@ describe('no private names', () => {
         return null; // not a git checkout (e.g. a tarball), or no commit yet
       }
     };
-    const log = read();
-    if (log === null) return;
+    const raw = read();
+    if (raw === null) return;
+    const log = withoutOwner(raw);
     for (const word of FORBIDDEN) expect(mentions(log, word), word).toBe(false);
   });
 });

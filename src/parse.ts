@@ -4,32 +4,21 @@
  * sections, no cross-reference streams, no object streams); anything else is refused with a code.
  */
 import type { PdfDict, PdfObject, PdfStream } from './objects.ts';
-import { isDict, isRef } from './objects.ts';
+import { isDict, isName } from './objects.ts';
+import { PdfReadError, type ReadFailure } from './errors.ts';
 
-export type ReadFailure =
-  | 'syntax'
-  | 'no-startxref'
-  | 'xref-stream'
-  | 'object-stream'
-  | 'xref-loop'
-  | 'object-missing'
-  | 'object-mismatch';
-
-export class PdfReadError extends Error {
-  readonly code: ReadFailure;
-  constructor(code: ReadFailure, detail: string) {
-    super(`${code}: ${detail}`);
-    this.code = code;
-  }
-}
+export { PdfReadError, type ReadFailure };
 
 const isWhite = (c: number): boolean =>
   c === 0x20 || c === 0x0a || c === 0x0d || c === 0x09 || c === 0x0c || c === 0x00;
 const isDelim = (c: number): boolean => '()<>[]{}/%'.includes(String.fromCharCode(c));
 
+const MAX_DEPTH = 256;
+
 export class Lexer {
   readonly buf: Uint8Array;
   pos: number;
+  private depth = 0;
   constructor(buf: Uint8Array, pos = 0) {
     this.buf = buf;
     this.pos = pos;
@@ -69,6 +58,15 @@ export class Lexer {
   }
 
   readObject(): PdfObject {
+    if (++this.depth > MAX_DEPTH) this.fail('nesting too deep');
+    try {
+      return this.readObjectInner();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private readObjectInner(): PdfObject {
     this.skipSpace();
     const c = this.buf[this.pos];
     if (c === undefined) this.fail('end of data');
@@ -96,11 +94,15 @@ export class Lexer {
     if (w === 'null') return null;
     if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(w)) this.fail(`unexpected "${w}"`);
     const n = Number(w);
+    if (/^[+-]?\d+$/.test(w) && !Number.isSafeInteger(n)) this.fail(`integer too large "${w}"`);
     // An integer may start a reference "num gen R".
     if (/^\d+$/.test(w)) {
       const save = this.pos;
       const g = this.word();
-      if (/^\d+$/.test(g) && this.word() === 'R') return { t: 'ref', num: n, gen: Number(g) };
+      if (/^\d+$/.test(g) && this.word() === 'R') {
+        if (!Number.isSafeInteger(Number(g))) this.fail(`integer too large "${g}"`);
+        return { t: 'ref', num: n, gen: Number(g) };
+      }
       this.pos = save;
     }
     return n;
@@ -113,14 +115,17 @@ export class Lexer {
       const c = this.buf[this.pos]!;
       if (isWhite(c) || isDelim(c)) break;
       if (c === 0x23) {
-        bytes.push(parseInt(latin1Text(this.buf, this.pos + 1, this.pos + 3), 16));
+        const hex = latin1Text(this.buf, this.pos + 1, this.pos + 3);
+        if (!/^[0-9a-fA-F]{2}$/.test(hex)) this.fail('bad name escape');
+        bytes.push(parseInt(hex, 16));
         this.pos += 3;
       } else {
         bytes.push(c);
         this.pos++;
       }
     }
-    return { t: 'name', v: new TextDecoder().decode(Uint8Array.from(bytes)) };
+    // One char per byte (Latin-1), so every name round-trips byte-exact.
+    return { t: 'name', v: latin1Text(Uint8Array.from(bytes), 0, bytes.length) };
   }
 
   private readLiteral(): PdfObject {
@@ -155,6 +160,10 @@ export class Lexer {
       } else if (c === 0x29) {
         if (--depth === 0) return { t: 'str', bytes: Uint8Array.from(out) };
         out.push(c);
+      } else if (c === 0x0d) {
+        // An unescaped end-of-line (CR or CRLF) reads as one LF (7.3.4.2).
+        if (b[this.pos] === 0x0a) this.pos++;
+        out.push(0x0a);
       } else out.push(c);
     }
     this.fail('unterminated string');
@@ -167,6 +176,7 @@ export class Lexer {
       const c = this.buf[this.pos++]!;
       if (!isWhite(c)) digits += String.fromCharCode(c);
     }
+    if (this.buf[this.pos] !== 0x3e) this.fail('unterminated hex string');
     this.pos++;
     if (!/^[0-9a-fA-F]*$/.test(digits)) this.fail('bad hex string');
     if (digits.length % 2) digits += '0';
@@ -207,27 +217,32 @@ export function lastIndexOf(buf: Uint8Array, marker: string, before = buf.length
   return -1;
 }
 
-export function indexOf(buf: Uint8Array, marker: string, from = 0): number {
-  outer: for (let i = from; i <= buf.length - marker.length; i++) {
-    for (let k = 0; k < marker.length; k++) if (buf[i + k] !== marker.charCodeAt(k)) continue outer;
-    return i;
-  }
-  return -1;
-}
-
 /** One `xref` section with its trailer, as found in the file. */
 export interface XrefSection {
   /** Offset of the `xref` keyword (the value `startxref` points to). */
   readonly at: number;
   readonly entries: Map<number, { offset: number; gen: number; inUse: boolean }>;
   readonly trailer: PdfDict;
+  /** Offset just after the trailer dictionary. */
+  readonly trailerEnd: number;
 }
 
 export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
   const lx = new Lexer(buf, at);
   const w = lx.peekWord();
   if (w !== 'xref') {
-    if (/^\d+$/.test(w)) throw new PdfReadError('xref-stream', `cross-reference stream at ${at}`);
+    if (/^\d+$/.test(w)) {
+      lx.word();
+      const gen = lx.word();
+      if (/^\d+$/.test(gen) && lx.word() === 'obj') {
+        const obj = lx.readObject();
+        if (isDict(obj)) {
+          const type = obj.entries.get('Type');
+          if (isName(type, 'XRef'))
+            throw new PdfReadError('xref-stream', `cross-reference stream at ${at}`);
+        }
+      }
+    }
     throw new PdfReadError('syntax', `no xref at ${at}`);
   }
   lx.word();
@@ -235,15 +250,25 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
   for (;;) {
     const head = lx.peekWord();
     if (head === 'trailer') break;
-    const start = Number(lx.word());
-    const count = Number(lx.word());
-    if (!Number.isInteger(start) || !Number.isInteger(count) || count < 0)
+    if (!/^\d+$/.test(head)) throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
+    const startWord = lx.word();
+    const countWord = lx.word();
+    if (!/^\d+$/.test(startWord) || !/^\d+$/.test(countWord))
+      throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
+    const start = Number(startWord);
+    const count = Number(countWord);
+    if (!Number.isSafeInteger(start + count))
       throw new PdfReadError('syntax', `xref subsection at ${lx.pos}`);
     for (let i = 0; i < count; i++) {
-      const offset = Number(lx.word());
-      const gen = Number(lx.word());
+      const offsetWord = lx.word();
+      const genWord = lx.word();
       const kind = lx.word();
-      if (kind !== 'n' && kind !== 'f') throw new PdfReadError('syntax', `xref entry at ${lx.pos}`);
+      if (!/^\d+$/.test(offsetWord) || !/^\d+$/.test(genWord) || (kind !== 'n' && kind !== 'f'))
+        throw new PdfReadError('syntax', `xref entry at ${lx.pos}`);
+      const offset = Number(offsetWord);
+      const gen = Number(genWord);
+      if (!Number.isSafeInteger(offset) || gen > 65535 || (kind === 'n' && offset >= buf.length))
+        throw new PdfReadError('syntax', `xref entry values at ${lx.pos}`);
       entries.set(start + i, { offset, gen, inUse: kind === 'n' });
     }
   }
@@ -252,43 +277,86 @@ export function readXrefSection(buf: Uint8Array, at: number): XrefSection {
   if (!isDict(trailer)) throw new PdfReadError('syntax', 'trailer');
   if (trailer.entries.has('XRefStm'))
     throw new PdfReadError('xref-stream', 'hybrid file with /XRefStm');
-  return { at, entries, trailer };
+  return { at, entries, trailer, trailerEnd: lx.pos };
 }
 
 /** The offset the last `startxref` (before `end`) points to. */
 export function lastStartxref(buf: Uint8Array, end = buf.length): number {
   const i = lastIndexOf(buf, 'startxref', end);
   if (i < 0) throw new PdfReadError('no-startxref', 'no startxref');
-  const n = Number(new Lexer(buf, i + 'startxref'.length).word());
-  if (!Number.isInteger(n) || n < 0 || n >= buf.length)
+  const word = new Lexer(buf, i + 'startxref'.length).word();
+  if (!/^\d+$/.test(word)) throw new PdfReadError('no-startxref', 'bad startxref');
+  const n = Number(word);
+  if (!Number.isSafeInteger(n) || n < 0 || n >= buf.length)
     throw new PdfReadError('no-startxref', 'bad startxref');
   return n;
 }
 
-/** Reads the object `num` at `offset`: either a plain object or a stream. */
+/**
+ * The offset just after the `%%EOF` that ends the revision whose trailer dictionary ends at `trailerEnd`:
+ * `startxref`, an integer and `%%EOF` must follow (white space and comments may lie between).
+ */
+export function readRevisionEnd(buf: Uint8Array, trailerEnd: number): number {
+  const lx = new Lexer(buf, trailerEnd);
+  lx.expectWord('startxref');
+  if (!/^\d+$/.test(lx.word())) throw new PdfReadError('syntax', `startxref value at ${lx.pos}`);
+  for (;;) {
+    while (lx.pos < buf.length && isWhite(buf[lx.pos]!)) lx.pos++;
+    if (latin1Text(buf, lx.pos, lx.pos + 5) === '%%EOF') return lx.pos + 5;
+    if (buf[lx.pos] !== 0x25) throw new PdfReadError('syntax', `no %%EOF at ${lx.pos}`);
+    while (lx.pos < buf.length && buf[lx.pos] !== 0x0a && buf[lx.pos] !== 0x0d) lx.pos++;
+  }
+}
+
+/**
+ * Reads the object `num` at `offset`: either a plain object or a stream. The header must start at
+ * `offset` (not inside a longer number) and carry `gen` when that is given.
+ */
 export function readIndirect(
   buf: Uint8Array,
   offset: number,
   num: number,
   resolveLength: (o: PdfObject) => number,
+  gen?: number,
 ): PdfObject | PdfStream {
-  const lx = new Lexer(buf, offset);
-  const n = Number(lx.word());
-  lx.word();
-  if (lx.word() !== 'obj' || n !== num)
+  const mismatch = (): never => {
     throw new PdfReadError('object-mismatch', `object ${num} not at ${offset}`);
+  };
+  // The byte before the header must separate it from the previous token. Exception: a revision appended
+  // directly after an EOL-less `%%EOF` (pyHanko after a pdf-lib file) starts right behind those 5 bytes. That `%%EOF` must start the file or a line, else it is
+  // the tail of some other token (`x%%EOF5 0 obj`, `(abc%%EOF5 0 obj`).
+  if (
+    offset > 0 &&
+    !isWhite(buf[offset - 1]!) &&
+    !isDelim(buf[offset - 1]!) &&
+    !(
+      offset >= 5 &&
+      latin1Text(buf, offset - 5, offset) === '%%EOF' &&
+      (offset === 5 || buf[offset - 6] === 0x0a || buf[offset - 6] === 0x0d)
+    )
+  )
+    mismatch();
+  const lx = new Lexer(buf, offset);
+  const nWord = lx.word();
+  const gWord = lx.word();
+  if (!/^\d+$/.test(nWord) || !/^\d+$/.test(gWord) || lx.word() !== 'obj') mismatch();
+  if (Number(nWord) !== num || (gen !== undefined && Number(gWord) !== gen)) mismatch();
   const value = lx.readObject();
   if (lx.peekWord() === 'stream' && isDict(value)) {
     lx.word();
     if (buf[lx.pos] === 0x0d) lx.pos++;
     if (buf[lx.pos] === 0x0a) lx.pos++;
     const len = resolveLength(value.entries.get('Length') ?? null);
+    if (!Number.isInteger(len) || len < 0 || lx.pos + len > buf.length)
+      throw new PdfReadError('syntax', `stream length of object ${num}`);
+    let end = lx.pos + len;
+    while (end < buf.length && isWhite(buf[end]!)) end++;
+    if (latin1Text(buf, end, end + 9) !== 'endstream')
+      throw new PdfReadError('syntax', `no endstream for object ${num}`);
     const data = buf.slice(lx.pos, lx.pos + len);
     const type = value.entries.get('Type');
-    if (typeof type === 'object' && type !== null && !Array.isArray(type) && type.t === 'name') {
-      if (type.v === 'ObjStm') throw new PdfReadError('object-stream', `object ${num}`);
-      if (type.v === 'XRef') throw new PdfReadError('xref-stream', `object ${num}`);
-    }
+    if (isName(type, 'ObjStm')) throw new PdfReadError('object-stream', `object ${num}`);
+    if (isName(type, 'XRef')) throw new PdfReadError('xref-stream', `object ${num}`);
     const dictCopy: PdfDict = { t: 'dict', entries: new Map(value.entries) };
     dictCopy.entries.delete('Length');
     return { t: 'stream', dict: dictCopy, data };
@@ -298,5 +366,3 @@ export function readIndirect(
 
 export const isStream = (o: unknown): o is PdfStream =>
   typeof o === 'object' && o !== null && (o as { t?: string }).t === 'stream';
-
-export { isRef };

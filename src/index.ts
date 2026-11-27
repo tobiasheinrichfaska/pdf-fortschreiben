@@ -7,9 +7,11 @@ export {
   attachmentChanges,
   readAttachments,
   type Attachment,
+  type ReadAttachmentsOptions,
   type AttachmentChange,
   type FoundAttachment,
   type Relationship,
+  type StreamCache,
 } from './attach.ts';
 export {
   appendDocTimeStamp,
@@ -20,7 +22,29 @@ export {
   type StampOptions,
   type Stamper,
 } from './timestamp.ts';
-export * from './objects.ts';
+export {
+  name,
+  ref,
+  raw,
+  hex,
+  dict,
+  latin1,
+  textString,
+  isDict,
+  isRef,
+  isName,
+  isStringLike,
+  hexText,
+  TextSink,
+  type PdfName,
+  type PdfString,
+  type PdfHex,
+  type PdfRef,
+  type PdfDict,
+  type PdfRaw,
+  type PdfObject,
+  type PdfStream,
+} from './objects.ts';
 export { PdfReadError, type ReadFailure } from './parse.ts';
 export { sha256Bytes } from './sha256.ts';
 
