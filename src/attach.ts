@@ -6,6 +6,7 @@
  * removed or changed.
  */
 import { PdfFile, Update } from './document.ts';
+import { PdfError, guard, guardAsync, unwrap, type Result } from './errors.ts';
 import {
   decodeText,
   dict,
@@ -20,7 +21,7 @@ import {
   type PdfObject,
   type PdfRef,
 } from './objects.ts';
-import { PdfReadError, isStream } from './parse.ts';
+import { isStream } from './parse.ts';
 import type { PdfStream } from './objects.ts';
 import { sha256Bytes, toHex } from './sha256.ts';
 
@@ -48,7 +49,7 @@ function getDict(u: Update, o: PdfObject | undefined): PdfDict | undefined {
 }
 
 const keyText = (o: PdfObject | undefined): string => {
-  if (!isStringLike(o)) throw new PdfReadError('syntax', 'name tree key is not a string');
+  if (!isStringLike(o)) throw new PdfError('syntax', 'name tree key is not a string');
   return decodeText(o.bytes);
 };
 
@@ -80,27 +81,29 @@ function treePairs(
   depth = 0,
   seen = new Set<number>(),
 ): Pair[] {
-  if (depth > MAX_DEPTH) throw new PdfReadError('syntax', 'name tree too deep');
+  if (depth > MAX_DEPTH) throw new PdfError('syntax', 'name tree too deep');
   if (isRef(node)) {
-    if (seen.has(node.num)) throw new PdfReadError('syntax', 'name tree loop');
+    if (seen.has(node.num)) throw new PdfError('syntax', 'name tree loop');
     seen.add(node.num);
   }
   const d = resolve(node);
-  if (!isDict(d as PdfObject))
-    throw new PdfReadError('syntax', 'name tree node is not a dictionary');
+  if (!isDict(d as PdfObject)) throw new PdfError('syntax', 'name tree node is not a dictionary');
   const entries = (d as PdfDict).entries;
   const out: Pair[] = [];
   if (entries.has('Kids')) {
-    if (!kids) throw new Error('attachFile: name tree with /Kids is not supported');
+    if (!kids)
+      throw new PdfError(
+        'unsupported-name-tree',
+        'attachFile: name tree with /Kids is not supported',
+      );
     const k = resolve(entries.get('Kids'));
-    if (!Array.isArray(k)) throw new PdfReadError('syntax', 'name tree /Kids is not an array');
+    if (!Array.isArray(k)) throw new PdfError('syntax', 'name tree /Kids is not an array');
     for (const kid of k) out.push(...treePairs(resolve, kid, kids, depth + 1, seen));
   }
   if (entries.has('Names')) {
     const arr = resolve(entries.get('Names'));
-    if (!Array.isArray(arr)) throw new PdfReadError('syntax', 'name tree /Names is not an array');
-    if (arr.length % 2 !== 0)
-      throw new PdfReadError('syntax', 'name tree /Names has an odd length');
+    if (!Array.isArray(arr)) throw new PdfError('syntax', 'name tree /Names is not an array');
+    if (arr.length % 2 !== 0) throw new PdfError('syntax', 'name tree /Names has an odd length');
     for (let i = 0; i < arr.length; i += 2)
       out.push({
         key: keyText(arr[i]),
@@ -112,10 +115,19 @@ function treePairs(
   return out;
 }
 
-/** Adds an associated file in `update`. A name already in the file is refused (nothing is replaced). */
-export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
-  if (!PRINTABLE.test(a.name)) throw new Error('attachFile: name must be printable ASCII');
-  if (!/^[\w.+-]+\/[\w.+-]+$/.test(a.mimeType)) throw new Error('attachFile: bad MIME type');
+/**
+ * Adds an associated file in `update`. A name already in the file is refused (`name-exists`, nothing is
+ * replaced). A failure after the first objects were added leaves them in `update`: discard that update.
+ */
+export function attachFile(file: PdfFile, update: Update, a: Attachment): Result<void> {
+  return guard(() => attach(file, update, a));
+}
+
+function attach(file: PdfFile, update: Update, a: Attachment): void {
+  if (!PRINTABLE.test(a.name))
+    throw new PdfError('bad-name', 'attachFile: name must be printable ASCII');
+  if (!/^[\w.+-]+\/[\w.+-]+$/.test(a.mimeType))
+    throw new PdfError('bad-mime', 'attachFile: bad MIME type');
   const params = dict({
     Size: a.data.length,
     ModDate: a.modified === undefined ? undefined : latin1(a.modified),
@@ -138,23 +150,23 @@ export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
 
   const root = file.rootRef;
   const catalog = getDict(update, root);
-  if (catalog === undefined) throw new PdfReadError('syntax', 'catalog');
+  if (catalog === undefined) throw new PdfError('syntax', 'catalog');
   const cat = clone(catalog);
 
   const resolve = (o: PdfObject | undefined): PdfObject | PdfStream | undefined =>
     isRef(o) ? update.get(o) : o;
   const namesObj = resolve(cat.entries.get('Names'));
   if (namesObj !== undefined && !isDict(namesObj as PdfObject))
-    throw new PdfReadError('syntax', '/Names is not a dictionary');
+    throw new PdfError('syntax', '/Names is not a dictionary');
   const namesDict = clone((namesObj as PdfDict | undefined) ?? dict({}));
   const treeObj = resolve(namesDict.entries.get('EmbeddedFiles'));
   if (treeObj !== undefined && !isDict(treeObj as PdfObject))
-    throw new PdfReadError('syntax', '/EmbeddedFiles is not a dictionary');
+    throw new PdfError('syntax', '/EmbeddedFiles is not a dictionary');
   const tree = clone((treeObj as PdfDict | undefined) ?? dict({}));
   const pairs: Pair[] =
     treeObj === undefined ? [] : treePairs(resolve, namesDict.entries.get('EmbeddedFiles'), false);
   if (pairs.some((p) => p.key === a.name))
-    throw new Error(`attachFile: "${a.name}" exists; use a new name`);
+    throw new PdfError('name-exists', `attachFile: "${a.name}" exists; use a new name`);
   const newKey = latin1(a.name);
   pairs.push({ key: a.name, keyBytes: newKey.bytes, keyObject: newKey, value: spec });
   pairs.sort((x, y) => compareBytes(x.keyBytes, y.keyBytes));
@@ -172,7 +184,10 @@ export function attachFile(file: PdfFile, update: Update, a: Attachment): void {
     ? update.get(cat.entries.get('AF') as PdfRef)
     : cat.entries.get('AF');
   if (oldAf !== undefined && !Array.isArray(oldAf))
-    throw new Error('attachFile: the catalog /AF is neither an array nor a reference to one');
+    throw new PdfError(
+      'bad-af',
+      'attachFile: the catalog /AF is neither an array nor a reference to one',
+    );
   const af: PdfObject[] = [];
   if (Array.isArray(oldAf)) for (const item of oldAf) af.push(item);
   af.push(spec);
@@ -218,7 +233,7 @@ export const DEFAULT_MAX_INFLATED_BYTES = 256 * 1024 * 1024;
 export interface ReadAttachmentsOptions {
   /**
    * Largest inflated size of one attachment (default 256 MiB); a larger one is returned raw with `tooLarge`.
-   * A finite integer >= 0 or `Infinity`; anything else throws a `RangeError`.
+   * A finite integer >= 0 or `Infinity`; anything else is `bad-options`.
    */
   readonly maxInflatedBytes?: number;
 }
@@ -323,15 +338,24 @@ function hasPredictor(file: PdfFile, stream: PdfStream): boolean {
  * `/FlateDecode` stream that inflates beyond `options.maxInflatedBytes` is not decoded: reading stops at the
  * cap and the entry carries the raw bytes with `tooLarge`.
  */
-export async function readAttachments(
+export function readAttachments(
   file: PdfFile,
   cache?: StreamCache,
   options: ReadAttachmentsOptions = {},
+): Promise<Result<FoundAttachment[]>> {
+  return guardAsync(() => readAll(file, cache, options));
+}
+
+async function readAll(
+  file: PdfFile,
+  cache: StreamCache | undefined,
+  options: ReadAttachmentsOptions,
 ): Promise<FoundAttachment[]> {
   const max: unknown =
     options.maxInflatedBytes === undefined ? DEFAULT_MAX_INFLATED_BYTES : options.maxInflatedBytes;
   if (typeof max !== 'number' || !(max === Infinity || (Number.isInteger(max) && max >= 0)))
-    throw new RangeError(
+    throw new PdfError(
+      'bad-options',
       'readAttachments: maxInflatedBytes must be a finite integer >= 0 or Infinity',
     );
   const names = file.dict(file.catalog.entries.get('Names'));
@@ -496,15 +520,21 @@ export interface AttachmentChange {
  * Files that an earlier revision had and a later one lost or changed (same name, other bytes). With
  * add-only writing this list is empty; anything in it means someone rewrote history after the fact.
  */
-export async function attachmentChanges(pdf: Uint8Array): Promise<AttachmentChange[]> {
-  const file = new PdfFile(pdf);
+export function attachmentChanges(pdf: Uint8Array): Promise<Result<AttachmentChange[]>> {
+  return guardAsync(() => changes(pdf));
+}
+
+async function changes(pdf: Uint8Array): Promise<AttachmentChange[]> {
+  const file = unwrap(PdfFile.open(pdf));
   const seen = new Map<string, string>();
   const out: AttachmentChange[] = [];
   const reported = new Set<string>();
   const cache: StreamCache = new Map();
   for (let i = 0; i < file.revisions.length; i++) {
     const now = new Map<string, string>();
-    for (const a of await readAttachments(new PdfFile(file.revisionBytes(i)), cache)) {
+    for (const a of unwrap(
+      await readAttachments(unwrap(PdfFile.open(file.revisionBytes(i))), cache),
+    )) {
       if (now.has(a.name) && !reported.has(a.name)) {
         out.push({ name: a.name, kind: 'changed', revision: i });
         reported.add(a.name);
@@ -528,7 +558,7 @@ const dataHashes = new WeakMap<Uint8Array, Uint8Array>();
 
 /**
  * Digest over data (via its SHA-256), MIME type, relationship, description, filter, source and the `extras`
- * fields (length-prefixed). A malformed name tree key makes `attachmentChanges` throw (fail loud).
+ * fields (length-prefixed). A malformed name tree key makes `attachmentChanges` fail with `syntax` (fail loud).
  */
 function attachmentDigest(a: FoundAttachment): string {
   const enc = new TextEncoder();

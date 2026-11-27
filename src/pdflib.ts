@@ -7,7 +7,7 @@
  * objects get exactly the numbers this library's `Update` gives them. The caller draws its page(s). Then
  * only the **new** objects and the **changed page-tree nodes** (`/Type /Pages`) are taken from pdf-lib's
  * context, serialized by pdf-lib and put into an `Update` with asserted object numbers. Anything else pdf-lib
- * changed is refused (`PdfLibError`), except the trailer's `/Info` dictionary, which is never copied (the
+ * changed is refused (`PdfError`), except the trailer's `/Info` dictionary, which is never copied (the
  * revision carries the earlier `/Info` over). The earlier bytes are never changed.
  *
  * `prepareDrawnPages` returns the open `Update`, so the same revision can also hold attachments
@@ -24,29 +24,10 @@ import {
   type StandardFontEmbedder,
 } from 'pdf-lib';
 import { PdfFile, Update, writeUpdate } from './document.ts';
+import { PdfError, guard, guardAsync, unwrap, type Result } from './errors.ts';
 import { raw, ref, type PdfRef } from './objects.ts';
 
-export type PdfLibFailure =
-  /** pdf-lib numbers objects differently from the file's xref (its counter is above `/Size` − 1). */
-  | 'numbering'
-  /** pdf-lib wrote an object with a generation other than 0. */
-  | 'generation'
-  /** pdf-lib changed an earlier object that is not a page-tree node (e.g. an existing page). */
-  | 'changed-object'
-  /** pdf-lib created a new `/Info` dictionary (it is never copied, and would leave a gap in the numbers). */
-  | 'info-created'
-  /** The draw step added no page. */
-  | 'no-new-page'
-  /** The earlier pages are not, in their order, the start of the new page list (removed, moved, inserted). */
-  | 'pages-changed';
-
-export class PdfLibError extends Error {
-  readonly code: PdfLibFailure;
-  constructor(code: PdfLibFailure, detail: string) {
-    super(`${code}: ${detail}`);
-    this.code = code;
-  }
-}
+export type { PdfLibFailure } from './errors.ts';
 
 /** What the draw step gets besides the pdf-lib document. */
 export interface DrawContext {
@@ -88,16 +69,21 @@ const infoNumber = (doc: PDFDocument): number | undefined => {
 
 /**
  * Loads `pdf` with pdf-lib, lets `draw` add pages, and returns the revision that holds them (not yet
- * written). Throws `PdfReadError` for a file this library does not continue and `PdfLibError` when pdf-lib
- * did more than add objects and change page-tree nodes.
+ * written). A file this library does not continue is a failure with a read code; pdf-lib doing more than
+ * adding objects and changing page-tree nodes is a failure with a pdf-lib code (`PdfLibFailure`). An error
+ * thrown by `draw` itself passes through.
  */
-export async function prepareDrawnPages(pdf: Uint8Array, draw: Draw): Promise<DrawnPages> {
-  const file = new PdfFile(pdf);
+export function prepareDrawnPages(pdf: Uint8Array, draw: Draw): Promise<Result<DrawnPages>> {
+  return guardAsync(() => prepare(pdf, draw));
+}
+
+async function prepare(pdf: Uint8Array, draw: Draw): Promise<DrawnPages> {
+  const file = unwrap(PdfFile.open(pdf));
   const oldSize = file.size;
   const doc = await PDFDocument.load(pdf, { updateMetadata: false });
   const { context } = doc;
   if (context.largestObjectNumber >= oldSize)
-    throw new PdfLibError('numbering', `pdf-lib sees object ${context.largestObjectNumber}`);
+    throw new PdfError('numbering', `pdf-lib sees object ${context.largestObjectNumber}`);
   // new objects must get exactly the numbers the update will give them
   context.largestObjectNumber = oldSize - 1;
   const before = new Map<number, string>();
@@ -114,54 +100,57 @@ export async function prepareDrawnPages(pdf: Uint8Array, draw: Draw): Promise<Dr
     .sort(([a], [b]) => a.objectNumber - b.objectNumber);
   for (const [r, o] of all) {
     if (r.generationNumber !== 0)
-      throw new PdfLibError('generation', `object ${r.objectNumber} ${r.generationNumber}`);
+      throw new PdfError('generation', `object ${r.objectNumber} ${r.generationNumber}`);
     const old = before.get(r.objectNumber);
     if (r.objectNumber === info) {
-      if (old === undefined) throw new PdfLibError('info-created', `object ${r.objectNumber}`);
+      if (old === undefined) throw new PdfError('info-created', `object ${r.objectNumber}`);
       continue; // the earlier /Info stays; pdf-lib's change is dropped
     }
     if (old === undefined) {
       if (r.objectNumber < oldSize)
-        throw new PdfLibError('numbering', `new object ${r.objectNumber} below /Size`);
+        throw new PdfError('numbering', `new object ${r.objectNumber} below /Size`);
       const added = update.add(raw(serialize(o)));
       if (added.num !== r.objectNumber)
-        throw new PdfLibError('numbering', `object ${r.objectNumber} would be ${added.num}`);
+        throw new PdfError('numbering', `object ${r.objectNumber} would be ${added.num}`);
       continue;
     }
     const now = serialize(o);
     if (now === old) continue;
-    if (!isPagesNode(o)) throw new PdfLibError('changed-object', `object ${r.objectNumber}`);
+    if (!isPagesNode(o)) throw new PdfError('changed-object', `object ${r.objectNumber}`);
     update.set(ref(r.objectNumber), raw(now));
   }
   // An earlier object pdf-lib dropped (context.delete) would silently stay in the file: refuse it.
   const after = new Set(all.map(([r]) => r.objectNumber));
   for (const num of before.keys())
-    if (!after.has(num)) throw new PdfLibError('changed-object', `object ${num} deleted`);
+    if (!after.has(num)) throw new PdfError('changed-object', `object ${num} deleted`);
   if (update.size !== Math.max(oldSize, context.largestObjectNumber + 1))
-    throw new PdfLibError('numbering', `pdf-lib counter ${context.largestObjectNumber}`);
+    throw new PdfError('numbering', `pdf-lib counter ${context.largestObjectNumber}`);
 
   // The page list as the written revision will show it: the earlier pages, unchanged and in their
   // order, then only new page objects.
   // writeUpdate refuses an update without objects; a draw step that changed nothing added no page.
-  if (update.objects.size === 0) throw new PdfLibError('no-new-page', 'draw added no page');
+  if (update.objects.size === 0) throw new PdfError('no-new-page', 'draw added no page');
   const oldPages = file.pages().map((r) => r.num);
-  const newPages = new PdfFile(writeUpdate(file, update).bytes).pages().map((r) => r.num);
+  const newPages = unwrap(PdfFile.open(unwrap(writeUpdate(file, update)).bytes))
+    .pages()
+    .map((r) => r.num);
   if (
     newPages.length < oldPages.length ||
     oldPages.some((n, i) => newPages[i] !== n) ||
     newPages.slice(oldPages.length).some((n) => n < oldSize)
   )
-    throw new PdfLibError('pages-changed', 'earlier pages are not kept as the start, in order');
+    throw new PdfError('pages-changed', 'earlier pages are not kept as the start, in order');
   if (newPages.length === oldPages.length || doc.getPageCount() === pagesBefore)
-    throw new PdfLibError('no-new-page', 'draw added no page');
+    throw new PdfError('no-new-page', 'draw added no page');
   const pages = newPages.slice(oldPages.length).map((n) => ref(n));
   return { file, update, pages };
 }
 
 /** `prepareDrawnPages` and `writeUpdate` in one: a revision with the drawn pages only. */
-export async function appendDrawnPages(pdf: Uint8Array, draw: Draw): Promise<Uint8Array> {
-  const { file, update } = await prepareDrawnPages(pdf, draw);
-  return writeUpdate(file, update).bytes;
+export async function appendDrawnPages(pdf: Uint8Array, draw: Draw): Promise<Result<Uint8Array>> {
+  const prepared = await prepareDrawnPages(pdf, draw);
+  if (!prepared.ok) return prepared;
+  return guard(() => unwrap(writeUpdate(prepared.value.file, prepared.value.update)).bytes);
 }
 
 /**

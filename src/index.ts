@@ -1,5 +1,6 @@
 /** pdf-fortschreiben: append revisions to a PDF, attach files, add document time stamps, read them back. */
 import { PdfFile, Update, writeUpdate } from './document.ts';
+import { guard, unwrap, type Result } from './errors.ts';
 
 export { PdfFile, Update, writeUpdate, type Revision, type Written } from './document.ts';
 export {
@@ -45,16 +46,34 @@ export {
   type PdfObject,
   type PdfStream,
 } from './objects.ts';
-export { PdfReadError, type ReadFailure } from './parse.ts';
+export {
+  PdfError,
+  type Failure,
+  type FailureCode,
+  type PdfLibFailure,
+  type ReadFailure,
+  type Result,
+  type UsageFailure,
+} from './errors.ts';
 export { sha256Bytes } from './sha256.ts';
 
-/** Appends one revision built by `build`; the bytes before it stay as they are. */
+/**
+ * Appends one revision built by `build`; the bytes before it stay as they are. `build` may return a
+ * failed `Result` (e.g. from `attachFile`) to stop: nothing is written then. A `PdfError` thrown by a low-level
+ * accessor inside `build` (`file.object`, `update.add`, ...) is returned as a failure; any other error is
+ * the caller's and passes through.
+ */
 export function appendRevision(
   pdf: Uint8Array,
-  build: (file: PdfFile, update: Update) => void,
-): Uint8Array {
-  const file = new PdfFile(pdf);
-  const update = new Update(file);
-  build(file, update);
-  return writeUpdate(file, update).bytes;
+  // `void` so that a block-bodied callback without a return statement is accepted
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  build: (file: PdfFile, update: Update) => Result<unknown> | void,
+): Result<Uint8Array> {
+  return guard(() => {
+    const file = unwrap(PdfFile.open(pdf));
+    const update = new Update(file);
+    const stop = build(file, update);
+    if (stop !== undefined) unwrap(stop);
+    return unwrap(writeUpdate(file, update)).bytes;
+  });
 }
