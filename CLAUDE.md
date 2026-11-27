@@ -84,8 +84,9 @@ npm run extern:validitaet   # needs openssl, qpdf, veraPDF; runs in CI job "Exte
   `exports` `.` and `./pdflib` point to `dist`; pdf-lib stays an optional peer. `tests/package.test.ts` builds a copy
   with `prepare` (no tsc on PATH) and imports `dist/index.js` and `dist/pdflib.js`. CI: `.github/workflows/tests.yml`
   (check „Tests“, actions pinned by tag, not by SHA).
-- **Tag `v0.1.0` approved by Tobias, not yet pushed:** Claude on the PC pushes it on the commit of this build (the
-  cloud session cannot push tags).
+- **Tag `v0.1.0` (2026-11-27, from the PC; the cloud session cannot push tags):** on the merge commit that brought
+  the `Result` API and the external check to `main`. A consumer pinned to an earlier commit still has the throwing
+  API and must adapt its calls when it moves to the tag.
 
 ## Open tasks (in this order)
 
@@ -95,7 +96,7 @@ npm run extern:validitaet   # needs openssl, qpdf, veraPDF; runs in CI job "Exte
 4. Visible content: new pages drawn by pdf-lib are done (`src/pdflib.ts`, app-independent); changing an
    existing page's content stream is not offered (an app adds pages instead).
 5. Report what changed between revisions (only allowed objects: annotations, AcroForm, attachments, pages).
-6. ~~A build before an app depends on it by tag~~ (done 2026-11-26, see „Build and release“; tag `v0.1.0` pending).
+6. ~~A build before an app depends on it by tag~~ (done 2026-11-26, see „Build and release“; tagged `v0.1.0`).
 7. Async SHA-256 via `crypto.subtle` as an option for big files (the pure-JS `Sha256` runs at ~55 MB/s).
 8. ~~Unify error classes (usage errors vs `PdfReadError`)~~ (done 2026-11-27: one `Failure` with `code`).
 9. ~~Check output with `qpdf --check` and veraPDF in `scripts/`~~ (done 2026-11-27: CI job `external` „External checks“, `npm run extern:validitaet`; first green run: qpdf OK on all four outputs, veraPDF no new failed rule against the base).
