@@ -144,26 +144,38 @@ describe('the built package (built here by `prepare` in a copy, no tsc on PATH)'
   it('dist/index.js loads, has the exports of src/index.ts and continues a PDF', async () => {
     const mod = (await import(pathToFileURL(join(dir, 'dist', 'index.js')).href)) as typeof core;
     expect(Object.keys(mod).sort()).toEqual(Object.keys(core).sort());
-    let pdf = mod.appendRevision(await basePdf(), (file, update) =>
+    const first = mod.appendRevision(await basePdf(), (file, update) =>
       mod.attachFile(file, update, {
         name: 'stand-01.json',
         data: text('{"a":1}'),
         mimeType: 'application/json',
       }),
     );
-    pdf = await mod.appendDocTimeStamp(pdf, fakeStamper());
+    if (!first.ok) throw new Error(first.code);
+    const stamped = await mod.appendDocTimeStamp(first.value, fakeStamper());
+    if (!stamped.ok) throw new Error(stamped.code);
+    const pdf = stamped.value;
     const stamps = mod.findDocTimeStamps(pdf);
-    expect(stamps).toHaveLength(1);
-    expect(stamps[0]?.rangeOk).toBe(true);
-    expect(await mod.attachmentChanges(pdf)).toEqual([]);
+    if (!stamps.ok) throw new Error(stamps.code);
+    expect(stamps.value).toHaveLength(1);
+    expect(stamps.value[0]?.rangeOk).toBe(true);
+    expect(await mod.attachmentChanges(pdf)).toEqual({ ok: true, value: [] });
+    // a failure comes back as a value from the built package too
+    expect(mod.appendRevision(new Uint8Array(10), () => {})).toMatchObject({
+      ok: false,
+      code: 'no-startxref',
+    });
   });
   it('dist/pdflib.js loads (pdf-lib as the peer) and appends a drawn page', async () => {
     const mod = (await import(pathToFileURL(join(dir, 'dist', 'pdflib.js')).href)) as typeof pdflib;
     expect(Object.keys(mod).sort()).toEqual(Object.keys(pdflib).sort());
-    const pdf = await mod.appendDrawnPages(await basePdf(), (doc) => {
+    const drawn = await mod.appendDrawnPages(await basePdf(), (doc) => {
       doc.addPage([595, 842]);
     });
+    if (!drawn.ok) throw new Error(drawn.code);
     const main = (await import(pathToFileURL(join(dir, 'dist', 'index.js')).href)) as typeof core;
-    expect(new main.PdfFile(pdf).pages().length).toBe(2);
+    const opened = main.PdfFile.open(drawn.value);
+    if (!opened.ok) throw new Error(opened.code);
+    expect(opened.value.pages().length).toBe(2);
   });
 });

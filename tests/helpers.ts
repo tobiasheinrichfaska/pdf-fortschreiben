@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { PdfFile, type Result } from '../src/index.ts';
 
 /** A small PDF as pdf-lib writes it with a classic cross-reference table (what the library accepts). */
 export async function basePdf(pages = 1, objectStreams = false): Promise<Uint8Array> {
@@ -21,6 +22,32 @@ export const fakeStamper =
     seen.push(digest);
     return Uint8Array.from([0x30, digest.length, ...digest]);
   };
+
+/** The value of a result; a failure fails the test with its code. */
+export const must = <T>(r: Result<T>): T => {
+  if (!r.ok) throw new Error(`unexpected failure ${r.code}: ${r.detail}`);
+  return r.value;
+};
+
+/** `PdfFile.open` that must succeed. */
+export const open = (bytes: Uint8Array): PdfFile => must(PdfFile.open(bytes));
+
+/** What a failed result looks like: `expect(r).toMatchObject(failure('syntax', /loop/))`. */
+export const failure = (code: string, detail?: RegExp | string) => ({
+  ok: false as const,
+  code,
+  ...(detail === undefined ? {} : { detail: expect.stringMatching(detail) }),
+});
+
+/** What a thrown `PdfError` of a low-level accessor looks like: `expect(fn).toThrow(thrown('syntax'))`. */
+export const thrown = (code: string, detail?: RegExp | string) =>
+  expect.objectContaining({
+    code,
+    ...(detail === undefined ? {} : { detail: expect.stringMatching(detail) }),
+  });
+
+/** The code of a failure, or `ok`. */
+export const codeOf = (r: Result<unknown>): string => (r.ok ? 'ok' : r.code);
 
 export const text = (s: string): Uint8Array => new TextEncoder().encode(s);
 export const ascii = (b: Uint8Array): string => String.fromCharCode(...b);

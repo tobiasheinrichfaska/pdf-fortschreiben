@@ -1,21 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { PdfFile } from '../src/document.ts';
 import {
   Lexer,
-  PdfReadError,
+  PdfError,
   lastStartxref,
   readIndirect,
   readRevisionEnd,
   readXrefSection,
 } from '../src/parse.ts';
+import { PdfFile } from '../src/index.ts';
 import { TextSink } from '../src/objects.ts';
-import { text } from './helpers.ts';
+import { text, open } from './helpers.ts';
 
 const codeOf = (fn: () => unknown): string | undefined => {
   try {
     fn();
   } catch (e) {
-    if (e instanceof PdfReadError) return e.code;
+    if (e instanceof PdfError) return e.code;
     throw e;
   }
   return undefined;
@@ -201,19 +201,22 @@ describe('hand-built classic files', () => {
       catalog,
       '<< /Type /ObjStm /N 0 /First 0 /Length 0 >>\nstream\n\nendstream',
     ]);
-    const f = new PdfFile(pdf);
+    const f = open(pdf);
     expect(() => f.object({ t: 'ref', num: 1, gen: 0 })).not.toThrow();
     expect(codeOf(() => f.object({ t: 'ref', num: 2, gen: 0 }))).toBe('object-stream');
   });
 
   it('reports a cross-reference stream object when it is read', () => {
     const pdf = build([catalog, '<< /Type /XRef /Length 0 >>\nstream\n\nendstream']);
-    expect(codeOf(() => new PdfFile(pdf).object({ t: 'ref', num: 2, gen: 0 }))).toBe('xref-stream');
+    expect(codeOf(() => open(pdf).object({ t: 'ref', num: 2, gen: 0 }))).toBe('xref-stream');
   });
 
   it('refuses a /Prev that points at its own xref section', () => {
-    expect(new PdfFile(build([catalog])).revisions).toHaveLength(1);
-    expect(codeOf(() => new PdfFile(build([catalog], (at) => at)))).toBe('xref-loop');
+    expect(open(build([catalog])).revisions).toHaveLength(1);
+    expect(PdfFile.open(build([catalog], (at) => at))).toMatchObject({
+      ok: false,
+      code: 'xref-loop',
+    });
   });
 });
 
