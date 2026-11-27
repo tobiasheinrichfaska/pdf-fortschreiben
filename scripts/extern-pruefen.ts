@@ -4,7 +4,14 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { appendDocTimeStamp, appendRevision, attachFile, findDocTimeStamps } from '../src/index.ts';
+import {
+  appendDocTimeStamp,
+  appendRevision,
+  attachFile,
+  findDocTimeStamps,
+  type PdfFile,
+  type Update,
+} from '../src/index.ts';
 
 const root = resolve(import.meta.dirname, '..');
 const tmp = resolve(root, '.tmp');
@@ -45,7 +52,7 @@ doc.setModificationDate(new Date('2026-11-01T00:00:00Z'));
 let pdf: Uint8Array = await doc.save({ useObjectStreams: false });
 
 // Add only: every day's state is a new file with its own name.
-const att = (s: string, mod: string, day: number) => (f: any, u: any) =>
+const att = (s: string, mod: string, day: number) => (f: PdfFile, u: Update) =>
   attachFile(f, u, {
     name: `monat-2026-11-tag-${String(day).padStart(2, '0')}.json`,
     data: te.encode(s),
