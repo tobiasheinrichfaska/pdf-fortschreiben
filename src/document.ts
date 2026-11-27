@@ -186,12 +186,17 @@ export class PdfFile {
     return c;
   }
 
-  /** The page objects in order (follows `/Kids` from the catalog's `/Pages`). */
+  /**
+   * The page objects in order (follows `/Kids` from the catalog's `/Pages`; a node reached twice is walked
+   * once; a tree deeper than 32 levels is refused with `PdfReadError('syntax')`, never cut silently).
+   */
   pages(): PdfRef[] {
     const out: PdfRef[] = [];
     const seen = new Set<number>();
     const walk = (r: PdfObject | undefined, depth: number): void => {
-      if (!isRef(r) || depth > 32 || seen.has(r.num)) return;
+      if (!isRef(r) || seen.has(r.num)) return;
+      if (depth > 32)
+        throw new PdfReadError('syntax', `page tree deeper than 32 levels at ${r.num}`);
       seen.add(r.num);
       const d = this.dict(r);
       if (d === undefined) return;
@@ -285,6 +290,8 @@ export class Update {
 }
 
 const RESERVED_TRAILER = ['Size', 'Prev', 'Root', 'ID', 'Encrypt'];
+/** Keys of the previous trailer that `writeUpdate` sets itself (everything else is carried over). */
+const OWN_TRAILER = new Set(['Size', 'Prev', 'Root', 'ID', 'Info']);
 
 export interface Written {
   readonly bytes: Uint8Array;
@@ -293,8 +300,8 @@ export interface Written {
 }
 
 /**
- * Appends the update as a new revision. `trailerExtra` may set `/Info` and other keys; `/Root` is carried
- * over, `/ID` is kept in its first element and gets a new second one (ISO 32000-1 14.4; a missing `/ID` is
+ * Appends the update as a new revision. `trailerExtra` may set `/Info` and other keys; `/Root`, `/Info` and
+ * every other key of the previous trailer are carried over (ISO 32000-1 7.5.6; `trailerExtra` wins), `/ID` is kept in its first element and gets a new second one (ISO 32000-1 14.4; a missing `/ID` is
  * created with both elements equal), `/Size` and `/Prev` are set here, and `/Size`, `/Prev`, `/Root`, `/ID`, `/Encrypt` in
  * `trailerExtra` are refused with an Error. An update without objects is refused.
  */
@@ -384,6 +391,8 @@ export function writeUpdate(
   }
   trailer.set('ID', [hex(first), hex(second)]);
   trailer.set('Prev', prevAt);
+  // ISO 32000-1 7.5.6: the added trailer holds every entry of the previous one (except /Prev).
+  for (const [k, v] of file.trailer.entries) if (!OWN_TRAILER.has(k)) trailer.set(k, v);
   for (const [k, v] of Object.entries(trailerExtra)) if (k !== 'Info') trailer.set(k, v);
   sink.push('trailer\n');
   sink.write({ t: 'dict', entries: trailer });
